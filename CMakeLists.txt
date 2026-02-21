@@ -86,3 +86,13 @@ target_link_libraries(dmosi_proc PUBLIC
 target_compile_definitions(dmosi_proc PRIVATE
     DMOSI_PROC_VERSION="${PROJECT_VERSION}"
 )
+
+# ======================================================================
+#               Tests
+# ======================================================================
+option(DMOSI_PROC_BUILD_TESTS "Build tests" OFF)
+
+if(DMOSI_PROC_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
