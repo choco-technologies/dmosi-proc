@@ -68,21 +68,21 @@ static bool kill_threads( dmosi_process_t process, int status )
     dmosi_thread_t* threads = Dmod_MallocEx(sizeof(dmosi_thread_t) * count, process->module_name);
     if(!threads)
     {
-        DMOD_LOG_ERROR("Failed to allocate memory for thread handles while killing process %s of module %s", process->name, process->module_name);
+        DMOD_LOG_ERROR("Failed to allocate memory for thread handles while killing process %s of module %s\n", process->name, process->module_name);
         return false;
     }
 
     size_t actual_count = dmosi_thread_get_by_process(process, threads, count);
     if(actual_count != count)
     {
-        DMOD_LOG_WARN("Thread count mismatch while killing process %s of module %s: expected %zu, got %zu", process->name, process->module_name, count, actual_count);
+        DMOD_LOG_WARN("Thread count mismatch while killing process %s of module %s: expected %zu, got %zu\n", process->name, process->module_name, count, actual_count);
     }
 
     for(size_t i = 0; i < actual_count; i++)
     {
         if(!dmosi_thread_kill(threads[i], status))
         {
-            DMOD_LOG_ERROR("Failed to kill thread in process %s of module %s", process->name, process->module_name);
+            DMOD_LOG_ERROR("Failed to kill thread in process %s of module %s\n", process->name, process->module_name);
             Dmod_Free(threads);
             return false;
         }
@@ -102,7 +102,7 @@ static bool kill_threads( dmosi_process_t process, int status )
  */
 static dmosi_process_t find_process_with_predicate(bool (*predicate)(dmosi_process_t process, void* context), void* context, const char* search_description)
 {
-    DMOD_LOG_VERBOSE("Searching for process: %s", search_description);
+    DMOD_LOG_VERBOSE("Searching for process: %s\n", search_description);
     
     // Get all threads to find processes through them
     size_t thread_count = dmosi_thread_get_all(NULL, 0);
@@ -114,7 +114,7 @@ static dmosi_process_t find_process_with_predicate(bool (*predicate)(dmosi_proce
     dmosi_thread_t* threads = Dmod_Malloc(sizeof(dmosi_thread_t) * thread_count);
     if(!threads)
     {
-        DMOD_LOG_ERROR("Failed to allocate memory for thread handles while searching for process: %s", search_description);
+        DMOD_LOG_ERROR("Failed to allocate memory for thread handles while searching for process: %s\n", search_description);
         return NULL;
     }
     
@@ -158,14 +158,14 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
 {
     if(name == NULL)
     {
-        DMOD_LOG_ERROR("Process name cannot be NULL");
+        DMOD_LOG_ERROR("Process name cannot be NULL\n");
         return NULL;
     }
     module_name = module_name ? module_name : DMOSI_SYSTEM_MODULE_NAME;
     dmosi_process_t process = Dmod_MallocEx(sizeof(struct dmosi_process), module_name );
     if(!process)
     {
-        DMOD_LOG_ERROR("Failed to allocate memory for process %s of module %s", name, module_name);
+        DMOD_LOG_ERROR("Failed to allocate memory for process %s of module %s\n", name, module_name);
         return NULL;
     }
 
@@ -178,14 +178,14 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
     process->pwd = NULL;
     if(!process->name)
     {
-        DMOD_LOG_ERROR("Failed to duplicate process name %s for module %s", name, module_name);
+        DMOD_LOG_ERROR("Failed to duplicate process name %s for module %s\n", name, module_name);
         Dmod_Free(process);
         return NULL;
     }
     process->parent = parent;
     strcpy(process->module_name, module_name);
 
-    DMOD_LOG_VERBOSE("Created process %s of module %s", name, module_name);
+    DMOD_LOG_VERBOSE("Created process %s of module %s\n", name, module_name);
     return process;
 }
 
@@ -193,16 +193,16 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, void, _process_destroy, (dmosi_process_t
 {
     if(!process)
     {
-        DMOD_LOG_ERROR("Cannot destroy NULL process");
+        DMOD_LOG_ERROR("Cannot destroy NULL process\n");
         return;
     }
-    DMOD_LOG_VERBOSE("Destroying process %s of module %s", process->name, process->module_name);
+    DMOD_LOG_VERBOSE("Destroying process %s of module %s\n", process->name, process->module_name);
 
     Dmod_EnterCritical();
 
     if(!kill_threads(process, process->exit_status))
     {
-        DMOD_LOG_ERROR("Failed to kill threads while destroying process %s of module %s", process->name, process->module_name);
+        DMOD_LOG_ERROR("Failed to kill threads while destroying process %s of module %s\n", process->name, process->module_name);
     }
 
     process->state = DMOSI_PROCESS_STATE_TERMINATED;
@@ -219,14 +219,14 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_kill, (dmosi_process_t pro
 {
     if(!process)
     {
-        DMOD_LOG_ERROR("Cannot kill NULL process");
+        DMOD_LOG_ERROR("Cannot kill NULL process\n");
         return -EINVAL;
     }
-    DMOD_LOG_VERBOSE("Killing process %s of module %s with status %d", process->name, process->module_name, status);
+    DMOD_LOG_VERBOSE("Killing process %s of module %s with status %d\n", process->name, process->module_name, status);
 
     if(!kill_threads(process, status))
     {
-        DMOD_LOG_ERROR("Failed to kill threads while killing process %s of module %s", process->name, process->module_name);
+        DMOD_LOG_ERROR("Failed to kill threads while killing process %s of module %s\n", process->name, process->module_name);
         return -EFAULT;
     }
 
@@ -240,10 +240,10 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_wait, (dmosi_process_t pro
 {
     if(!process)
     {
-        DMOD_LOG_ERROR("Cannot wait for NULL process");
+        DMOD_LOG_ERROR("Cannot wait for NULL process\n");
         return -EINVAL;
     }
-    DMOD_LOG_VERBOSE("Waiting for process %s of module %s to terminate with timeout %d ms", process->name, process->module_name, timeout_ms);
+    DMOD_LOG_VERBOSE("Waiting for process %s of module %s to terminate with timeout %d ms\n", process->name, process->module_name, timeout_ms);
 
     int elapsed = 0;
     const int poll_interval = 100; // Poll every 100 ms
@@ -252,14 +252,14 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_wait, (dmosi_process_t pro
     {
         if(timeout_ms >= 0 && elapsed >= timeout_ms)
         {
-            DMOD_LOG_WARN("Timeout while waiting for process %s of module %s to terminate", process->name, process->module_name);
+            DMOD_LOG_WARN("Timeout while waiting for process %s of module %s to terminate\n", process->name, process->module_name);
             return -ETIMEDOUT;
         }
         dmosi_thread_sleep(poll_interval);
         elapsed += poll_interval;
     }
 
-    DMOD_LOG_VERBOSE("Process %s of module %s has terminated with exit status %d", process->name, process->module_name, process->exit_status);
+    DMOD_LOG_VERBOSE("Process %s of module %s has terminated with exit status %d\n", process->name, process->module_name, process->exit_status);
 
     return 0;
 }
@@ -269,13 +269,13 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_current,   (vo
     dmosi_thread_t current_thread = dmosi_thread_current();
     if(!current_thread)
     {
-        DMOD_LOG_ERROR("Failed to get current thread while retrieving current process");
+        DMOD_LOG_ERROR("Failed to get current thread while retrieving current process\n");
         return NULL;
     }
     dmosi_process_t process = dmosi_thread_get_process(current_thread);
     if(!process)
     {
-        DMOD_LOG_ERROR("Current thread does not belong to any process");
+        DMOD_LOG_ERROR("Current thread does not belong to any process\n");
         return NULL;
     }
     return process;
@@ -285,7 +285,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_get_exit_status, (dmosi_pr
 {
     if(!process)
     {
-        DMOD_LOG_ERROR("Cannot get exit status of NULL process");
+        DMOD_LOG_ERROR("Cannot get exit status of NULL process\n");
         return -EINVAL;
     }
     return process->exit_status;
@@ -295,7 +295,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_state_t, _process_get_stat
 {
     if(!process)
     {
-        DMOD_LOG_ERROR("Cannot get state of NULL process");
+        DMOD_LOG_ERROR("Cannot get state of NULL process\n");
         return -EINVAL;
     }
     return process->state;
@@ -305,7 +305,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_id_t, _process_get_id, (dm
 {
     if(!process)
     {
-        DMOD_LOG_ERROR("Cannot get ID of NULL process");
+        DMOD_LOG_ERROR("Cannot get ID of NULL process\n");
         return 0;
     }
     return process->pid;
@@ -315,7 +315,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_name, (dmosi_p
 {
     if(!process)
     {
-        DMOD_LOG_ERROR("Cannot get name of NULL process");
+        DMOD_LOG_ERROR("Cannot get name of NULL process\n");
         return NULL;
     }
     return process->name;
@@ -325,7 +325,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_module_name, (
 {
     if(!process)
     {
-        DMOD_LOG_ERROR("Cannot get module name of NULL process");
+        DMOD_LOG_ERROR("Cannot get module name of NULL process\n");
         return NULL;
     }
     return process->module_name;
@@ -335,7 +335,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int,            _process_set_uid,   (dmo
 {
     if(!validate_process(process))
     {
-        DMOD_LOG_ERROR("Invalid process handle provided to set UID");
+        DMOD_LOG_ERROR("Invalid process handle provided to set UID\n");
         return -EINVAL;
     }
     process->uid = uid;
@@ -346,7 +346,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_user_id_t, _process_get_uid,   (dm
 {
     if(!validate_process(process))
     {
-        DMOD_LOG_ERROR("Invalid process handle provided to get UID");
+        DMOD_LOG_ERROR("Invalid process handle provided to get UID\n");
         return 0;
     }
     return process->uid;
@@ -356,7 +356,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_get_parent, (d
 {
     if(!process)
     {
-        DMOD_LOG_ERROR("Cannot get parent of NULL process");
+        DMOD_LOG_ERROR("Cannot get parent of NULL process\n");
         return NULL;
     }
     return process->parent;
@@ -366,10 +366,10 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_id, (dmosi_process_t p
 {
     if(!validate_process(process))
     {
-        DMOD_LOG_ERROR("Invalid process handle provided to set process ID");
+        DMOD_LOG_ERROR("Invalid process handle provided to set process ID\n");
         return -EINVAL;
     }
-    DMOD_LOG_VERBOSE("Setting process ID of %s to %u", process->name, pid);
+    DMOD_LOG_VERBOSE("Setting process ID of %s to %u\n", process->name, pid);
     process->pid = pid;
     return 0;
 }
@@ -378,20 +378,20 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_module_name, (dmosi_pr
 {
     if(!validate_process(process))
     {
-        DMOD_LOG_ERROR("Invalid process handle provided to set module name");
+        DMOD_LOG_ERROR("Invalid process handle provided to set module name\n");
         return -EINVAL;
     }
     if(!module_name)
     {
-        DMOD_LOG_ERROR("Module name cannot be NULL");
+        DMOD_LOG_ERROR("Module name cannot be NULL\n");
         return -EINVAL;
     }
     if(strlen(module_name) >= DMOD_MAX_MODULE_NAME_LENGTH)
     {
-        DMOD_LOG_ERROR("Module name too long: %s", module_name);
+        DMOD_LOG_ERROR("Module name too long: %s\n", module_name);
         return -EINVAL;
     }
-    DMOD_LOG_VERBOSE("Setting module name of process %s to %s", process->name, module_name);
+    DMOD_LOG_VERBOSE("Setting module name of process %s to %s\n", process->name, module_name);
     strcpy(process->module_name, module_name);
     return 0;
 }
@@ -400,15 +400,15 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_pwd, (dmosi_process_t 
 {
     if(!validate_process(process))
     {
-        DMOD_LOG_ERROR("Invalid process handle provided to set working directory");
+        DMOD_LOG_ERROR("Invalid process handle provided to set working directory\n");
         return -EINVAL;
     }
     if(!pwd)
     {
-        DMOD_LOG_ERROR("Working directory cannot be NULL");
+        DMOD_LOG_ERROR("Working directory cannot be NULL\n");
         return -EINVAL;
     }
-    DMOD_LOG_VERBOSE("Setting working directory of process %s to %s", process->name, pwd);
+    DMOD_LOG_VERBOSE("Setting working directory of process %s to %s\n", process->name, pwd);
     
     // Free existing pwd if any
     if(process->pwd)
@@ -420,7 +420,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_pwd, (dmosi_process_t 
     process->pwd = Dmod_StrDup(pwd);
     if(!process->pwd)
     {
-        DMOD_LOG_ERROR("Failed to allocate memory for working directory");
+        DMOD_LOG_ERROR("Failed to allocate memory for working directory\n");
         return -ENOMEM;
     }
     
@@ -431,7 +431,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_pwd, (dmosi_pr
 {
     if(!validate_process(process))
     {
-        DMOD_LOG_ERROR("Invalid process handle provided to get working directory");
+        DMOD_LOG_ERROR("Invalid process handle provided to get working directory\n");
         return NULL;
     }
     
@@ -443,10 +443,10 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_exit_status, (dmosi_pr
 {
     if(!validate_process(process))
     {
-        DMOD_LOG_ERROR("Invalid process handle provided to set exit status");
+        DMOD_LOG_ERROR("Invalid process handle provided to set exit status\n");
         return -EINVAL;
     }
-    DMOD_LOG_VERBOSE("Setting exit status of process %s to %d", process->name, exit_status);
+    DMOD_LOG_VERBOSE("Setting exit status of process %s to %d\n", process->name, exit_status);
     process->exit_status = exit_status;
     return 0;
 }
@@ -455,7 +455,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_find_by_name, 
 {
     if(!name)
     {
-        DMOD_LOG_ERROR("Process name cannot be NULL");
+        DMOD_LOG_ERROR("Process name cannot be NULL\n");
         return NULL;
     }
     
@@ -466,7 +466,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_find_by_id, (d
 {
     if(pid == 0)
     {
-        DMOD_LOG_ERROR("Process ID cannot be 0");
+        DMOD_LOG_ERROR("Process ID cannot be 0\n");
         return NULL;
     }
     
