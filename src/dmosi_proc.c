@@ -266,6 +266,10 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_wait, (dmosi_process_t pro
 
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_current,   (void) )
 {
+    if(!dmosi_is_started())
+    {
+        return NULL;
+    }
     dmosi_thread_t current_thread = dmosi_thread_current();
     if(!current_thread)
     {

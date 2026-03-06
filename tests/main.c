@@ -415,6 +415,21 @@ void test_null_inputs(void)
 
 // -----------------------------------------
 //
+//      Test: Current process before system start
+//
+// -----------------------------------------
+void test_process_current_before_start(void)
+{
+    printf("\n=== Testing process current before system start ===\n");
+
+    // dmosi_is_started() returns false in the test environment (no RTOS scheduler),
+    // so dmosi_process_current() should return NULL silently without logging an error.
+    TEST_ASSERT(dmosi_process_current() == NULL,
+                "process_current returns NULL when system has not started");
+}
+
+// -----------------------------------------
+//
 //      Test: Find process by name/ID (without threads)
 //
 // -----------------------------------------
@@ -453,6 +468,7 @@ int main(void)
     test_process_wait();
     test_process_unique_ids();
     test_null_inputs();
+    test_process_current_before_start();
     test_process_find();
 
     printf("\n========================================\n");
