@@ -175,6 +175,43 @@ void test_process_pwd(void)
 
 // -----------------------------------------
 //
+//      Test: Process standard streams (stdin/stdout/stderr/stdlog)
+//
+// -----------------------------------------
+void test_process_stdio(void)
+{
+    printf("\n=== Testing process standard streams ===\n");
+
+    dmosi_process_t proc = dmosi_process_create("stdio_proc", "test_module", NULL);
+    TEST_ASSERT(proc != NULL, "Create process for stdio test");
+
+    // Default streams should be unset (NULL)
+    TEST_ASSERT(dmosi_process_get_stdin(proc) == NULL, "Default stdin is NULL");
+    TEST_ASSERT(dmosi_process_get_stdout(proc) == NULL, "Default stdout is NULL");
+    TEST_ASSERT(dmosi_process_get_stderr(proc) == NULL, "Default stderr is NULL");
+    TEST_ASSERT(dmosi_process_get_stdlog(proc) == NULL, "Default stdlog is NULL");
+
+    // Set streams
+    TEST_ASSERT(dmosi_process_set_stdin(proc, "/dev/tty0") == 0, "Set stdin path");
+    TEST_ASSERT(dmosi_process_set_stdout(proc, "/dev/tty1") == 0, "Set stdout path");
+    TEST_ASSERT(dmosi_process_set_stderr(proc, "/dev/tty2") == 0, "Set stderr path");
+    TEST_ASSERT(dmosi_process_set_stdlog(proc, "/var/log/app.log") == 0, "Set stdlog path");
+
+    // Get streams
+    TEST_ASSERT(strcmp(dmosi_process_get_stdin(proc), "/dev/tty0") == 0, "Get stdin returns '/dev/tty0'");
+    TEST_ASSERT(strcmp(dmosi_process_get_stdout(proc), "/dev/tty1") == 0, "Get stdout returns '/dev/tty1'");
+    TEST_ASSERT(strcmp(dmosi_process_get_stderr(proc), "/dev/tty2") == 0, "Get stderr returns '/dev/tty2'");
+    TEST_ASSERT(strcmp(dmosi_process_get_stdlog(proc), "/var/log/app.log") == 0, "Get stdlog returns '/var/log/app.log'");
+
+    // Update streams
+    TEST_ASSERT(dmosi_process_set_stdin(proc, "/dev/tty3") == 0, "Update stdin path");
+    TEST_ASSERT(strcmp(dmosi_process_get_stdin(proc), "/dev/tty3") == 0, "Get stdin returns updated path");
+
+    dmosi_process_destroy(proc);
+}
+
+// -----------------------------------------
+//
 //      Test: Process exit status
 //
 // -----------------------------------------
@@ -376,6 +413,18 @@ void test_null_inputs(void)
     TEST_ASSERT(dmosi_process_get_pwd(NULL) == NULL,
                 "Get PWD of NULL process returns NULL");
 
+    TEST_ASSERT(dmosi_process_get_stdin(NULL) == NULL,
+                "Get stdin of NULL process returns NULL");
+
+    TEST_ASSERT(dmosi_process_get_stdout(NULL) == NULL,
+                "Get stdout of NULL process returns NULL");
+
+    TEST_ASSERT(dmosi_process_get_stderr(NULL) == NULL,
+                "Get stderr of NULL process returns NULL");
+
+    TEST_ASSERT(dmosi_process_get_stdlog(NULL) == NULL,
+                "Get stdlog of NULL process returns NULL");
+
     // NULL name for find_by_name
     TEST_ASSERT(dmosi_process_find_by_name(NULL) == NULL,
                 "Find by NULL name returns NULL");
@@ -400,6 +449,18 @@ void test_null_inputs(void)
     TEST_ASSERT(dmosi_process_set_exit_status(NULL, 0) == -EINVAL,
                 "Set exit status on NULL process returns -EINVAL");
 
+    TEST_ASSERT(dmosi_process_set_stdin(NULL, "/dev/tty0") == -EINVAL,
+                "Set stdin on NULL process returns -EINVAL");
+
+    TEST_ASSERT(dmosi_process_set_stdout(NULL, "/dev/tty0") == -EINVAL,
+                "Set stdout on NULL process returns -EINVAL");
+
+    TEST_ASSERT(dmosi_process_set_stderr(NULL, "/dev/tty0") == -EINVAL,
+                "Set stderr on NULL process returns -EINVAL");
+
+    TEST_ASSERT(dmosi_process_set_stdlog(NULL, "/dev/tty0") == -EINVAL,
+                "Set stdlog on NULL process returns -EINVAL");
+
     // NULL arguments for setter functions
     dmosi_process_t proc = dmosi_process_create("null_arg_proc", "test_module", NULL);
     TEST_ASSERT(proc != NULL, "Create process for NULL argument tests");
@@ -409,6 +470,18 @@ void test_null_inputs(void)
 
     TEST_ASSERT(dmosi_process_set_pwd(proc, NULL) == -EINVAL,
                 "Set NULL PWD returns -EINVAL");
+
+    TEST_ASSERT(dmosi_process_set_stdin(proc, NULL) == -EINVAL,
+                "Set NULL stdin returns -EINVAL");
+
+    TEST_ASSERT(dmosi_process_set_stdout(proc, NULL) == -EINVAL,
+                "Set NULL stdout returns -EINVAL");
+
+    TEST_ASSERT(dmosi_process_set_stderr(proc, NULL) == -EINVAL,
+                "Set NULL stderr returns -EINVAL");
+
+    TEST_ASSERT(dmosi_process_set_stdlog(proc, NULL) == -EINVAL,
+                "Set NULL stdlog returns -EINVAL");
 
     dmosi_process_destroy(proc);
 }
@@ -461,6 +534,7 @@ int main(void)
     test_process_parent_child();
     test_process_uid();
     test_process_pwd();
+    test_process_stdio();
     test_process_exit_status();
     test_process_id();
     test_process_module_name();

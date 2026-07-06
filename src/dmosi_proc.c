@@ -26,6 +26,10 @@ struct dmosi_process
     dmosi_process_id_t pid;                         /**< Unique process ID */
     dmosi_user_id_t uid;                            /**< User ID associated with the process */
     char* pwd;                                      /**< Working directory path */
+    char* stdin_path;                               /**< Standard input file path */
+    char* stdout_path;                              /**< Standard output file path */
+    char* stderr_path;                              /**< Standard error file path */
+    char* stdlog_path;                              /**< Standard log file path */
 };
 
 /**
@@ -137,6 +141,45 @@ static dmosi_process_t find_process_with_predicate(bool (*predicate)(dmosi_proce
 }
 
 /**
+ * @brief Set a string field of a process (e.g. stdin/stdout/stderr/stdlog path)
+ *
+ * @param process Process handle
+ * @param field Pointer to the field to set
+ * @param value New value for the field
+ * @param field_name Name of the field (used for error/log messages)
+ * @return int 0 on success, negative error code on failure
+ */
+static int set_process_string_field(dmosi_process_t process, char** field, const char* value, const char* field_name)
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to set %s\n", field_name);
+        return -EINVAL;
+    }
+    if(!value)
+    {
+        DMOD_LOG_ERROR("%s cannot be NULL\n", field_name);
+        return -EINVAL;
+    }
+    DMOD_LOG_VERBOSE("Setting %s of process %s to %s\n", field_name, process->name, value);
+
+    char* new_value = Dmod_StrDup(value);
+    if(!new_value)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for %s\n", field_name);
+        return -ENOMEM;
+    }
+
+    if(*field)
+    {
+        Dmod_Free(*field);
+    }
+    *field = new_value;
+
+    return 0;
+}
+
+/**
  * @brief Predicate function for finding process by name
  */
 static bool process_name_predicate(dmosi_process_t process, void* context)
@@ -176,6 +219,10 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
     process->pid = generate_process_id();
     process->uid = 0;
     process->pwd = NULL;
+    process->stdin_path = NULL;
+    process->stdout_path = NULL;
+    process->stderr_path = NULL;
+    process->stdlog_path = NULL;
     if(!process->name)
     {
         DMOD_LOG_ERROR("Failed to duplicate process name %s for module %s\n", name, module_name);
@@ -210,6 +257,10 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, void, _process_destroy, (dmosi_process_t
 
     Dmod_Free(process->name);
     Dmod_Free(process->pwd);
+    Dmod_Free(process->stdin_path);
+    Dmod_Free(process->stdout_path);
+    Dmod_Free(process->stderr_path);
+    Dmod_Free(process->stdlog_path);
     Dmod_Free(process);
 
     Dmod_ExitCritical();
@@ -441,6 +492,66 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_pwd, (dmosi_pr
     
     // Return stored pwd or default to root if not set
     return process->pwd ? process->pwd : "/";
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stdin, (dmosi_process_t process, const char* path) )
+{
+    return set_process_string_field(process, &process->stdin_path, path, "standard input");
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_stdin, (dmosi_process_t process) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to get standard input\n");
+        return NULL;
+    }
+    return process->stdin_path;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stdout, (dmosi_process_t process, const char* path) )
+{
+    return set_process_string_field(process, &process->stdout_path, path, "standard output");
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_stdout, (dmosi_process_t process) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to get standard output\n");
+        return NULL;
+    }
+    return process->stdout_path;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stderr, (dmosi_process_t process, const char* path) )
+{
+    return set_process_string_field(process, &process->stderr_path, path, "standard error");
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_stderr, (dmosi_process_t process) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to get standard error\n");
+        return NULL;
+    }
+    return process->stderr_path;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stdlog, (dmosi_process_t process, const char* path) )
+{
+    return set_process_string_field(process, &process->stdlog_path, path, "standard log");
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_stdlog, (dmosi_process_t process) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to get standard log\n");
+        return NULL;
+    }
+    return process->stdlog_path;
 }
 
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_exit_status, (dmosi_process_t process, int exit_status) )
