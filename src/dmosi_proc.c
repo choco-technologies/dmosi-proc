@@ -5,7 +5,17 @@
 // DMOSPROC in ASCII
 #define MAGIC_NUMBER    0x444D4F5350524F43ULL    
 
-static dmosi_process_id_t next_process_id = 1; 
+static dmosi_process_id_t next_process_id = 1;
+
+/**
+ * @brief State of a single process stream slot (stdin/stdout/stderr/stdlog)
+ */
+typedef struct
+{
+    char* path;             /**< Path bound to this stream slot, NULL if unset */
+    void* handle;           /**< Open file handle for path, NULL if unset */
+    volatile bool locked;   /**< Recursion guard, set while the slot is locked */
+} dmosi_process_stream_t;
 
 /**
  * @brief Opaque type for process
@@ -26,10 +36,7 @@ struct dmosi_process
     dmosi_process_id_t pid;                         /**< Unique process ID */
     dmosi_user_id_t uid;                            /**< User ID associated with the process */
     char* pwd;                                      /**< Working directory path */
-    char* stdin_path;                               /**< Standard input file path */
-    char* stdout_path;                              /**< Standard output file path */
-    char* stderr_path;                              /**< Standard error file path */
-    char* stdlog_path;                              /**< Standard log file path */
+    dmosi_process_stream_t streams[DMOSI_STREAM_COUNT]; /**< Stream slots (stdin/stdout/stderr/stdlog) */
 };
 
 /**
@@ -141,42 +148,29 @@ static dmosi_process_t find_process_with_predicate(bool (*predicate)(dmosi_proce
 }
 
 /**
- * @brief Set a string field of a process (e.g. stdin/stdout/stderr/stdlog path)
+ * @brief Determine the fopen-style mode to use when binding a stream slot to a file
  *
- * @param process Process handle
- * @param field Pointer to the field to set
- * @param value New value for the field
- * @param field_name Name of the field (used for error/log messages)
- * @return int 0 on success, negative error code on failure
+ * Stdin is opened for reading; the output-oriented slots (stdout/stderr/stdlog) are
+ * opened for appending so that binding the same path from multiple processes (e.g.
+ * after inheritance) does not truncate what earlier processes already wrote to it.
+ *
+ * @param index Stream slot being opened
+ * @return const char* fopen-style mode string
  */
-static int set_process_string_field(dmosi_process_t process, char** field, const char* value, const char* field_name)
+static const char* stream_open_mode(dmosi_stream_index_t index)
 {
-    if(!validate_process(process))
-    {
-        DMOD_LOG_ERROR("Invalid process handle provided to set %s\n", field_name);
-        return -EINVAL;
-    }
-    if(!value)
-    {
-        DMOD_LOG_ERROR("%s cannot be NULL\n", field_name);
-        return -EINVAL;
-    }
-    DMOD_LOG_VERBOSE("Setting %s of process %s to %s\n", field_name, process->name, value);
+    return (index == DMOSI_STREAM_STDIN) ? "r" : "a";
+}
 
-    char* new_value = Dmod_StrDup(value);
-    if(!new_value)
-    {
-        DMOD_LOG_ERROR("Failed to allocate memory for %s\n", field_name);
-        return -ENOMEM;
-    }
-
-    if(*field)
-    {
-        Dmod_Free(*field);
-    }
-    *field = new_value;
-
-    return 0;
+/**
+ * @brief Validate that a stream index refers to an existing slot in a process
+ *
+ * @param index Stream slot index to validate
+ * @return bool true if the index is within range, false otherwise
+ */
+static bool validate_stream_index(dmosi_stream_index_t index)
+{
+    return index >= 0 && index < DMOSI_STREAM_COUNT;
 }
 
 /**
@@ -219,10 +213,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
     process->pid = generate_process_id();
     process->uid = 0;
     process->pwd = NULL;
-    process->stdin_path = NULL;
-    process->stdout_path = NULL;
-    process->stderr_path = NULL;
-    process->stdlog_path = NULL;
+    memset(process->streams, 0, sizeof(process->streams));
     if(!process->name)
     {
         DMOD_LOG_ERROR("Failed to duplicate process name %s for module %s\n", name, module_name);
@@ -231,6 +222,19 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
     }
     process->parent = parent;
     strcpy(process->module_name, module_name);
+
+    // Inherit the parent's stream bindings (by path, not by handle, so that
+    // closing one process's stream handle never affects the other's).
+    if(parent)
+    {
+        for(dmosi_stream_index_t i = 0; i < DMOSI_STREAM_COUNT; i++)
+        {
+            if(parent->streams[i].path && dmosi_process_set_stream(process, i, parent->streams[i].path) != 0)
+            {
+                DMOD_LOG_WARN("Failed to inherit stream %d (%s) from parent process %s into %s\n", (int)i, parent->streams[i].path, parent->name, name);
+            }
+        }
+    }
 
     DMOD_LOG_VERBOSE("Created process %s of module %s\n", name, module_name);
     return process;
@@ -255,12 +259,17 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, void, _process_destroy, (dmosi_process_t
     process->state = DMOSI_PROCESS_STATE_TERMINATED;
     process->magic = 0; // Invalidate the process handle
 
+    for(dmosi_stream_index_t i = 0; i < DMOSI_STREAM_COUNT; i++)
+    {
+        if(process->streams[i].handle)
+        {
+            Dmod_FileClose(process->streams[i].handle);
+        }
+        Dmod_Free(process->streams[i].path);
+    }
+
     Dmod_Free(process->name);
     Dmod_Free(process->pwd);
-    Dmod_Free(process->stdin_path);
-    Dmod_Free(process->stdout_path);
-    Dmod_Free(process->stderr_path);
-    Dmod_Free(process->stdlog_path);
     Dmod_Free(process);
 
     Dmod_ExitCritical();
@@ -494,64 +503,107 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_pwd, (dmosi_pr
     return process->pwd ? process->pwd : "/";
 }
 
-DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stdin, (dmosi_process_t process, const char* path) )
-{
-    return set_process_string_field(process, &process->stdin_path, path, "standard input");
-}
-
-DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_stdin, (dmosi_process_t process) )
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stream, (dmosi_process_t process, dmosi_stream_index_t index, const char* path) )
 {
     if(!validate_process(process))
     {
-        DMOD_LOG_ERROR("Invalid process handle provided to get standard input\n");
-        return NULL;
+        DMOD_LOG_ERROR("Invalid process handle provided to set stream\n");
+        return -EINVAL;
     }
-    return process->stdin_path;
+    if(!validate_stream_index(index))
+    {
+        DMOD_LOG_ERROR("Invalid stream index %d provided to set stream\n", (int)index);
+        return -EINVAL;
+    }
+    if(!path)
+    {
+        DMOD_LOG_ERROR("Stream path cannot be NULL\n");
+        return -EINVAL;
+    }
+
+    void* handle = Dmod_FileOpen(path, stream_open_mode(index));
+    if(!handle)
+    {
+        DMOD_LOG_ERROR("Failed to open %s for stream %d of process %s\n", path, (int)index, process->name);
+        return -EIO;
+    }
+
+    char* new_path = Dmod_StrDup(path);
+    if(!new_path)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for stream path\n");
+        Dmod_FileClose(handle);
+        return -ENOMEM;
+    }
+
+    dmosi_process_stream_t* stream = &process->streams[index];
+    if(stream->handle)
+    {
+        Dmod_FileClose(stream->handle);
+    }
+    Dmod_Free(stream->path);
+
+    stream->path = new_path;
+    stream->handle = handle;
+
+    DMOD_LOG_VERBOSE("Set stream %d of process %s to %s\n", (int)index, process->name, path);
+    return 0;
 }
 
-DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stdout, (dmosi_process_t process, const char* path) )
-{
-    return set_process_string_field(process, &process->stdout_path, path, "standard output");
-}
-
-DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_stdout, (dmosi_process_t process) )
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, void*, _process_get_stream, (dmosi_process_t process, dmosi_stream_index_t index) )
 {
     if(!validate_process(process))
     {
-        DMOD_LOG_ERROR("Invalid process handle provided to get standard output\n");
+        DMOD_LOG_ERROR("Invalid process handle provided to get stream\n");
         return NULL;
     }
-    return process->stdout_path;
-}
-
-DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stderr, (dmosi_process_t process, const char* path) )
-{
-    return set_process_string_field(process, &process->stderr_path, path, "standard error");
-}
-
-DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_stderr, (dmosi_process_t process) )
-{
-    if(!validate_process(process))
+    if(!validate_stream_index(index))
     {
-        DMOD_LOG_ERROR("Invalid process handle provided to get standard error\n");
+        DMOD_LOG_ERROR("Invalid stream index %d provided to get stream\n", (int)index);
         return NULL;
     }
-    return process->stderr_path;
+
+    // NULL (unset) is a normal result here: callers fall back to raw kernel I/O in that case.
+    return process->streams[index].handle;
 }
 
-DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stdlog, (dmosi_process_t process, const char* path) )
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_lock_stream, (dmosi_process_t process, dmosi_stream_index_t index) )
 {
-    return set_process_string_field(process, &process->stdlog_path, path, "standard log");
-}
-
-DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_stdlog, (dmosi_process_t process) )
-{
-    if(!validate_process(process))
+    if(!validate_process(process) || !validate_stream_index(index))
     {
-        DMOD_LOG_ERROR("Invalid process handle provided to get standard log\n");
-        return NULL;
+        return -EINVAL;
     }
-    return process->stdlog_path;
+
+    // No logging in this path: it must be interrupt-safe and re-entrancy-safe,
+    // since it is what guards logging itself against recursing into itself.
+    dmosi_process_stream_t* stream = &process->streams[index];
+
+    Dmod_EnterCritical();
+    if(stream->locked)
+    {
+        Dmod_ExitCritical();
+        return -EBUSY;
+    }
+    stream->locked = true;
+    Dmod_ExitCritical();
+
+    return 0;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_unlock_stream, (dmosi_process_t process, dmosi_stream_index_t index) )
+{
+    if(!validate_process(process) || !validate_stream_index(index))
+    {
+        return -EINVAL;
+    }
+
+    dmosi_process_stream_t* stream = &process->streams[index];
+
+    Dmod_EnterCritical();
+    stream->locked = false;
+    Dmod_ExitCritical();
+
+    return 0;
 }
 
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_exit_status, (dmosi_process_t process, int exit_status) )

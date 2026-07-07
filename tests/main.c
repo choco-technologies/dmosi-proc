@@ -182,32 +182,124 @@ void test_process_stdio(void)
 {
     printf("\n=== Testing process standard streams ===\n");
 
+    // The stdin slot is opened for reading, so it needs a file that already exists.
+    const char* stdin_path = "/tmp/dmosi_test_stdin.txt";
+    FILE* seed = fopen(stdin_path, "w");
+    TEST_ASSERT(seed != NULL, "Create seed file for stdin stream test");
+    if(seed)
+    {
+        fputs("test\n", seed);
+        fclose(seed);
+    }
+
     dmosi_process_t proc = dmosi_process_create("stdio_proc", "test_module", NULL);
     TEST_ASSERT(proc != NULL, "Create process for stdio test");
 
     // Default streams should be unset (NULL)
-    TEST_ASSERT(dmosi_process_get_stdin(proc) == NULL, "Default stdin is NULL");
-    TEST_ASSERT(dmosi_process_get_stdout(proc) == NULL, "Default stdout is NULL");
-    TEST_ASSERT(dmosi_process_get_stderr(proc) == NULL, "Default stderr is NULL");
-    TEST_ASSERT(dmosi_process_get_stdlog(proc) == NULL, "Default stdlog is NULL");
+    TEST_ASSERT(dmosi_process_get_stream(proc, DMOSI_STREAM_STDIN) == NULL, "Default stdin stream is NULL");
+    TEST_ASSERT(dmosi_process_get_stream(proc, DMOSI_STREAM_STDOUT) == NULL, "Default stdout stream is NULL");
+    TEST_ASSERT(dmosi_process_get_stream(proc, DMOSI_STREAM_STDERR) == NULL, "Default stderr stream is NULL");
+    TEST_ASSERT(dmosi_process_get_stream(proc, DMOSI_STREAM_STDLOG) == NULL, "Default stdlog stream is NULL");
 
-    // Set streams
-    TEST_ASSERT(dmosi_process_set_stdin(proc, "/dev/tty0") == 0, "Set stdin path");
-    TEST_ASSERT(dmosi_process_set_stdout(proc, "/dev/tty1") == 0, "Set stdout path");
-    TEST_ASSERT(dmosi_process_set_stderr(proc, "/dev/tty2") == 0, "Set stderr path");
-    TEST_ASSERT(dmosi_process_set_stdlog(proc, "/var/log/app.log") == 0, "Set stdlog path");
+    // Set streams (stdin must point at an existing file; stdout/stderr/stdlog are appended to)
+    TEST_ASSERT(dmosi_process_set_stream(proc, DMOSI_STREAM_STDIN, stdin_path) == 0, "Set stdin stream");
+    TEST_ASSERT(dmosi_process_set_stream(proc, DMOSI_STREAM_STDOUT, "/tmp/dmosi_test_stdout.log") == 0, "Set stdout stream");
+    TEST_ASSERT(dmosi_process_set_stream(proc, DMOSI_STREAM_STDERR, "/tmp/dmosi_test_stderr.log") == 0, "Set stderr stream");
+    TEST_ASSERT(dmosi_process_set_stream(proc, DMOSI_STREAM_STDLOG, "/tmp/dmosi_test_stdlog.log") == 0, "Set stdlog stream");
 
-    // Get streams
-    TEST_ASSERT(strcmp(dmosi_process_get_stdin(proc), "/dev/tty0") == 0, "Get stdin returns '/dev/tty0'");
-    TEST_ASSERT(strcmp(dmosi_process_get_stdout(proc), "/dev/tty1") == 0, "Get stdout returns '/dev/tty1'");
-    TEST_ASSERT(strcmp(dmosi_process_get_stderr(proc), "/dev/tty2") == 0, "Get stderr returns '/dev/tty2'");
-    TEST_ASSERT(strcmp(dmosi_process_get_stdlog(proc), "/var/log/app.log") == 0, "Get stdlog returns '/var/log/app.log'");
+    // Get streams: each slot should now hold an open file handle
+    TEST_ASSERT(dmosi_process_get_stream(proc, DMOSI_STREAM_STDIN) != NULL, "Get stdin stream returns a handle");
+    TEST_ASSERT(dmosi_process_get_stream(proc, DMOSI_STREAM_STDOUT) != NULL, "Get stdout stream returns a handle");
+    TEST_ASSERT(dmosi_process_get_stream(proc, DMOSI_STREAM_STDERR) != NULL, "Get stderr stream returns a handle");
+    TEST_ASSERT(dmosi_process_get_stream(proc, DMOSI_STREAM_STDLOG) != NULL, "Get stdlog stream returns a handle");
 
-    // Update streams
-    TEST_ASSERT(dmosi_process_set_stdin(proc, "/dev/tty3") == 0, "Update stdin path");
-    TEST_ASSERT(strcmp(dmosi_process_get_stdin(proc), "/dev/tty3") == 0, "Get stdin returns updated path");
+    // Re-binding a slot must close the previous handle without leaking/crashing
+    void* old_stdout_handle = dmosi_process_get_stream(proc, DMOSI_STREAM_STDOUT);
+    TEST_ASSERT(dmosi_process_set_stream(proc, DMOSI_STREAM_STDOUT, "/tmp/dmosi_test_stdout2.log") == 0, "Re-bind stdout stream to a new path");
+    TEST_ASSERT(dmosi_process_get_stream(proc, DMOSI_STREAM_STDOUT) != old_stdout_handle, "Re-binding stdout stream produces a new handle");
 
     dmosi_process_destroy(proc);
+
+    remove(stdin_path);
+    remove("/tmp/dmosi_test_stdout.log");
+    remove("/tmp/dmosi_test_stdout2.log");
+    remove("/tmp/dmosi_test_stderr.log");
+    remove("/tmp/dmosi_test_stdlog.log");
+}
+
+// -----------------------------------------
+//
+//      Test: Process stream lock/unlock
+//
+// -----------------------------------------
+void test_process_stream_lock(void)
+{
+    printf("\n=== Testing process stream lock/unlock ===\n");
+
+    dmosi_process_t proc = dmosi_process_create("lock_proc", "test_module", NULL);
+    TEST_ASSERT(proc != NULL, "Create process for stream lock test");
+
+    TEST_ASSERT(dmosi_process_lock_stream(proc, DMOSI_STREAM_STDLOG) == 0,
+                "Lock stdlog stream succeeds the first time");
+
+    TEST_ASSERT(dmosi_process_lock_stream(proc, DMOSI_STREAM_STDLOG) == -EBUSY,
+                "Locking an already-locked stream returns -EBUSY (recursion guard)");
+
+    // Other slots are independent of the locked one
+    TEST_ASSERT(dmosi_process_lock_stream(proc, DMOSI_STREAM_STDOUT) == 0,
+                "Locking a different stream slot is unaffected by another slot's lock");
+    TEST_ASSERT(dmosi_process_unlock_stream(proc, DMOSI_STREAM_STDOUT) == 0,
+                "Unlock stdout stream succeeds");
+
+    TEST_ASSERT(dmosi_process_unlock_stream(proc, DMOSI_STREAM_STDLOG) == 0,
+                "Unlock stdlog stream succeeds");
+
+    TEST_ASSERT(dmosi_process_lock_stream(proc, DMOSI_STREAM_STDLOG) == 0,
+                "Stdlog stream can be locked again after unlocking");
+    TEST_ASSERT(dmosi_process_unlock_stream(proc, DMOSI_STREAM_STDLOG) == 0,
+                "Unlock stdlog stream succeeds again");
+
+    dmosi_process_destroy(proc);
+}
+
+// -----------------------------------------
+//
+//      Test: Process stream inheritance
+//
+// -----------------------------------------
+void test_process_stream_inheritance(void)
+{
+    printf("\n=== Testing process stream inheritance ===\n");
+
+    const char* log_path = "/tmp/dmosi_test_inherited_stdlog.log";
+
+    dmosi_process_t parent = dmosi_process_create("stream_parent", "test_module", NULL);
+    TEST_ASSERT(parent != NULL, "Create parent process for stream inheritance test");
+
+    TEST_ASSERT(dmosi_process_set_stream(parent, DMOSI_STREAM_STDLOG, log_path) == 0,
+                "Set stdlog stream on parent process");
+    TEST_ASSERT(dmosi_process_get_stream(parent, DMOSI_STREAM_STDOUT) == NULL,
+                "Parent stdout stream is left unset");
+
+    dmosi_process_t child = dmosi_process_create("stream_child", "test_module", parent);
+    TEST_ASSERT(child != NULL, "Create child process under parent with a bound stream");
+
+    void* parent_handle = dmosi_process_get_stream(parent, DMOSI_STREAM_STDLOG);
+    void* child_handle = dmosi_process_get_stream(child, DMOSI_STREAM_STDLOG);
+    TEST_ASSERT(child_handle != NULL, "Child inherits a bound stdlog stream handle");
+    TEST_ASSERT(child_handle != parent_handle, "Child gets its own handle, distinct from the parent's");
+
+    TEST_ASSERT(dmosi_process_get_stream(child, DMOSI_STREAM_STDOUT) == NULL,
+                "Child does not inherit a stream slot the parent never set");
+
+    // Destroying the child must not affect the parent's still-open handle
+    dmosi_process_destroy(child);
+    TEST_ASSERT(dmosi_process_get_stream(parent, DMOSI_STREAM_STDLOG) == parent_handle,
+                "Parent stream handle is unaffected by destroying the child");
+
+    dmosi_process_destroy(parent);
+
+    remove(log_path);
 }
 
 // -----------------------------------------
@@ -413,17 +505,14 @@ void test_null_inputs(void)
     TEST_ASSERT(dmosi_process_get_pwd(NULL) == NULL,
                 "Get PWD of NULL process returns NULL");
 
-    TEST_ASSERT(dmosi_process_get_stdin(NULL) == NULL,
-                "Get stdin of NULL process returns NULL");
+    TEST_ASSERT(dmosi_process_get_stream(NULL, DMOSI_STREAM_STDIN) == NULL,
+                "Get stream of NULL process returns NULL");
 
-    TEST_ASSERT(dmosi_process_get_stdout(NULL) == NULL,
-                "Get stdout of NULL process returns NULL");
+    TEST_ASSERT(dmosi_process_lock_stream(NULL, DMOSI_STREAM_STDLOG) == -EINVAL,
+                "Lock stream on NULL process returns -EINVAL");
 
-    TEST_ASSERT(dmosi_process_get_stderr(NULL) == NULL,
-                "Get stderr of NULL process returns NULL");
-
-    TEST_ASSERT(dmosi_process_get_stdlog(NULL) == NULL,
-                "Get stdlog of NULL process returns NULL");
+    TEST_ASSERT(dmosi_process_unlock_stream(NULL, DMOSI_STREAM_STDLOG) == -EINVAL,
+                "Unlock stream on NULL process returns -EINVAL");
 
     // NULL name for find_by_name
     TEST_ASSERT(dmosi_process_find_by_name(NULL) == NULL,
@@ -449,17 +538,8 @@ void test_null_inputs(void)
     TEST_ASSERT(dmosi_process_set_exit_status(NULL, 0) == -EINVAL,
                 "Set exit status on NULL process returns -EINVAL");
 
-    TEST_ASSERT(dmosi_process_set_stdin(NULL, "/dev/tty0") == -EINVAL,
-                "Set stdin on NULL process returns -EINVAL");
-
-    TEST_ASSERT(dmosi_process_set_stdout(NULL, "/dev/tty0") == -EINVAL,
-                "Set stdout on NULL process returns -EINVAL");
-
-    TEST_ASSERT(dmosi_process_set_stderr(NULL, "/dev/tty0") == -EINVAL,
-                "Set stderr on NULL process returns -EINVAL");
-
-    TEST_ASSERT(dmosi_process_set_stdlog(NULL, "/dev/tty0") == -EINVAL,
-                "Set stdlog on NULL process returns -EINVAL");
+    TEST_ASSERT(dmosi_process_set_stream(NULL, DMOSI_STREAM_STDOUT, "/tmp/dmosi_test_null.log") == -EINVAL,
+                "Set stream on NULL process returns -EINVAL");
 
     // NULL arguments for setter functions
     dmosi_process_t proc = dmosi_process_create("null_arg_proc", "test_module", NULL);
@@ -471,17 +551,17 @@ void test_null_inputs(void)
     TEST_ASSERT(dmosi_process_set_pwd(proc, NULL) == -EINVAL,
                 "Set NULL PWD returns -EINVAL");
 
-    TEST_ASSERT(dmosi_process_set_stdin(proc, NULL) == -EINVAL,
-                "Set NULL stdin returns -EINVAL");
+    TEST_ASSERT(dmosi_process_set_stream(proc, DMOSI_STREAM_STDOUT, NULL) == -EINVAL,
+                "Set stream with NULL path returns -EINVAL");
 
-    TEST_ASSERT(dmosi_process_set_stdout(proc, NULL) == -EINVAL,
-                "Set NULL stdout returns -EINVAL");
+    TEST_ASSERT(dmosi_process_set_stream(proc, (dmosi_stream_index_t)999, "/tmp/dmosi_test_null.log") == -EINVAL,
+                "Set stream with out-of-range index returns -EINVAL");
 
-    TEST_ASSERT(dmosi_process_set_stderr(proc, NULL) == -EINVAL,
-                "Set NULL stderr returns -EINVAL");
+    TEST_ASSERT(dmosi_process_get_stream(proc, (dmosi_stream_index_t)999) == NULL,
+                "Get stream with out-of-range index returns NULL");
 
-    TEST_ASSERT(dmosi_process_set_stdlog(proc, NULL) == -EINVAL,
-                "Set NULL stdlog returns -EINVAL");
+    TEST_ASSERT(dmosi_process_lock_stream(proc, (dmosi_stream_index_t)999) == -EINVAL,
+                "Lock stream with out-of-range index returns -EINVAL");
 
     dmosi_process_destroy(proc);
 }
@@ -535,6 +615,8 @@ int main(void)
     test_process_uid();
     test_process_pwd();
     test_process_stdio();
+    test_process_stream_lock();
+    test_process_stream_inheritance();
     test_process_exit_status();
     test_process_id();
     test_process_module_name();
