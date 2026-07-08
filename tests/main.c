@@ -551,8 +551,8 @@ void test_null_inputs(void)
     TEST_ASSERT(dmosi_process_set_pwd(proc, NULL) == -EINVAL,
                 "Set NULL PWD returns -EINVAL");
 
-    TEST_ASSERT(dmosi_process_set_stream(proc, DMOSI_STREAM_STDOUT, NULL) == -EINVAL,
-                "Set stream with NULL path returns -EINVAL");
+    TEST_ASSERT(dmosi_process_set_stream(proc, DMOSI_STREAM_STDOUT, NULL) == 0,
+                "Set stream with NULL path clears the binding and returns 0");
 
     TEST_ASSERT(dmosi_process_set_stream(proc, (dmosi_stream_index_t)999, "/tmp/dmosi_test_null.log") == -EINVAL,
                 "Set stream with out-of-range index returns -EINVAL");
