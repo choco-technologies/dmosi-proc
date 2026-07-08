@@ -515,10 +515,23 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stream, (dmosi_process
         DMOD_LOG_ERROR("Invalid stream index %d provided to set stream\n", (int)index);
         return -EINVAL;
     }
+
+    dmosi_process_stream_t* stream = &process->streams[index];
+
     if(!path)
     {
-        DMOD_LOG_ERROR("Stream path cannot be NULL\n");
-        return -EINVAL;
+        // Clear the binding: close the file backing this slot (if any) and revert to the
+        // unbound state, where callers fall back to their own default resolution.
+        if(stream->handle)
+        {
+            Dmod_FileClose(stream->handle);
+        }
+        Dmod_Free(stream->path);
+        stream->path = NULL;
+        stream->handle = NULL;
+
+        DMOD_LOG_VERBOSE("Cleared stream %d of process %s\n", (int)index, process->name);
+        return 0;
     }
 
     void* handle = Dmod_FileOpen(path, stream_open_mode(index));
@@ -536,7 +549,6 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stream, (dmosi_process
         return -ENOMEM;
     }
 
-    dmosi_process_stream_t* stream = &process->streams[index];
     if(stream->handle)
     {
         Dmod_FileClose(stream->handle);
@@ -565,6 +577,23 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, void*, _process_get_stream, (dmosi_proce
 
     // NULL (unset) is a normal result here: callers fall back to raw kernel I/O in that case.
     return process->streams[index].handle;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_stream_path, (dmosi_process_t process, dmosi_stream_index_t index) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to get stream path\n");
+        return NULL;
+    }
+    if(!validate_stream_index(index))
+    {
+        DMOD_LOG_ERROR("Invalid stream index %d provided to get stream path\n", (int)index);
+        return NULL;
+    }
+
+    // NULL (unset) is a normal result here: it means the slot has no explicit binding.
+    return process->streams[index].path;
 }
 
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_lock_stream, (dmosi_process_t process, dmosi_stream_index_t index) )
