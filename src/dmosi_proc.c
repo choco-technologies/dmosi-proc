@@ -29,6 +29,7 @@ struct dmosi_process
 {
     uint64_t magic;                                 /**< Magic number for validation */
     char* name;                                     /**< Name of the process */
+    char* allocator_name;                           /**< Name+PID used to attribute heap allocations to this process instance */
     dmosi_process_t parent;                         /**< Parent process (NULL for detached processes) */
     char module_name[DMOD_MAX_MODULE_NAME_LENGTH];  /**< Name of the associated module */
     int exit_status;                                /**< Exit status code (set when process is killed) */
@@ -220,6 +221,19 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
         Dmod_Free(process);
         return NULL;
     }
+
+    // Combine process name and PID so that concurrent instances of the same
+    // module get distinct heap allocation identities (see Dmod_GetCurrentAllocatorNameEx).
+    char allocator_name_buf[DMOD_MAX_MODULE_NAME_LENGTH + 16];
+    Dmod_SnPrintf(allocator_name_buf, sizeof(allocator_name_buf), "%s#%u", name, (unsigned)process->pid);
+    process->allocator_name = Dmod_StrDup(allocator_name_buf);
+    if(!process->allocator_name)
+    {
+        DMOD_LOG_ERROR("Failed to build allocator name for process %s of module %s\n", name, module_name);
+        Dmod_Free(process->name);
+        Dmod_Free(process);
+        return NULL;
+    }
     process->parent = parent;
     strcpy(process->module_name, module_name);
 
@@ -269,6 +283,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, void, _process_destroy, (dmosi_process_t
     }
 
     Dmod_Free(process->name);
+    Dmod_Free(process->allocator_name);
     Dmod_Free(process->pwd);
     Dmod_Free(process);
 
@@ -393,6 +408,16 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_module_name, (
         return NULL;
     }
     return process->module_name;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_allocator_name, (dmosi_process_t process) )
+{
+    if(!process)
+    {
+        DMOD_LOG_ERROR("Cannot get allocator name of NULL process\n");
+        return NULL;
+    }
+    return process->allocator_name;
 }
 
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int,            _process_set_uid,   (dmosi_process_t process, dmosi_user_id_t uid) )
