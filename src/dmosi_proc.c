@@ -333,16 +333,21 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_current,   (vo
     {
         return NULL;
     }
+    // Deliberately not logged: having no current thread/process is a routine condition
+    // here (early boot, driver-owned threads never registered with dmosi, ...), not an
+    // error - and logging from this exact path is dangerous. Any log call eventually
+    // reaches Dmod_LockStdio, which itself calls dmosi_process_current() to resolve
+    // whose stdout to lock - on the very same "no process" thread, that recurses
+    // straight back into this branch, logs again, locks again, and so on, blowing the
+    // stack in a handful of frames (this has been observed to hard-fault the target).
     dmosi_thread_t current_thread = dmosi_thread_current();
     if(!current_thread)
     {
-        DMOD_LOG_ERROR("Failed to get current thread while retrieving current process\n");
         return NULL;
     }
     dmosi_process_t process = dmosi_thread_get_process(current_thread);
     if(!process)
     {
-        DMOD_LOG_ERROR("Current thread does not belong to any process\n");
         return NULL;
     }
     return process;
