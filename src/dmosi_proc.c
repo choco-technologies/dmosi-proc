@@ -287,15 +287,22 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_kill, (dmosi_process_t pro
     }
     DMOD_LOG_VERBOSE("Killing process %s of module %s with status %d\n", process->name, process->module_name, status);
 
+    // Set exit_status/state *before* kill_threads(), not after: when a process kills its
+    // own currently-running thread (the normal case - every spawned module calls this on
+    // itself via Dmod_Exit when it finishes), dmosi_thread_kill() ends in vTaskDelete(NULL),
+    // which never returns to its caller. Anything placed after kill_threads() here would
+    // simply never run for that case, leaving the process stuck at its prior state forever
+    // (observed as background jobs whose underlying task is long gone but that dmell's
+    // reaper never sees as DMOSI_PROCESS_STATE_TERMINATED, so it never frees them).
+    process->exit_status = status;
+    process->state = DMOSI_PROCESS_STATE_TERMINATED;
+
     if(!kill_threads(process, status))
     {
         DMOD_LOG_ERROR("Failed to kill threads while killing process %s of module %s\n", process->name, process->module_name);
         return -EFAULT;
     }
 
-    process->exit_status = status;
-    process->state = DMOSI_PROCESS_STATE_TERMINATED;
-    
     return 0;
 }
 
