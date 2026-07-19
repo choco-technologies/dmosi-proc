@@ -1,0 +1,22 @@
+# DMOD Resource File for dmosi-proc
+# This file specifies where resources should be installed / packaged.
+# dmosi-proc is a built-in library module - no .dmf file is distributed.
+# It implements the process-management part of the dmosi interface and is
+# consumed as a plain static library by OSI backends such as dmosi-posix and
+# dmosi-freertos. Its public API is declared in dmosi.h (from the separate
+# dmosi module), so no headers of its own are packaged here.
+
+# === Static Library ===
+# Precompiled static library (architecture-specific build)
+lib=./lib/libdmosi_proc.a => ${destination}/${module}/lib/libdmosi_proc.a [origin=${build_dir}/libdmosi_proc.a]
+
+# === Documentation ===
+# README file
+readme=./README.md => ${destination}/${module}/README.md [origin=${repo_dir}/README.md]
+
+# === License ===
+# License file
+license=./LICENSE => ${destination}/${module}/LICENSE [origin=${repo_dir}/LICENSE]
+
+# Adding itself
+dmr=./dmosi-proc.dmr => ${destination}/${module}/dmosi-proc.dmr [origin=${repo_dir}/dmosi-proc.dmr]

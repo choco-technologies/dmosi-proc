@@ -1,0 +1,284 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  discover-architectures:
+    name: Discover Architectures
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: chocotechnologies/dmod:1.0.4
+    outputs:
+      architectures: ${{ steps.list-archs.outputs.architectures }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Fetch dmod to discover architectures
+        run: |
+          mkdir -p build_discovery
+          cd build_discovery
+          cmake ..
+
+      - name: List available architectures
+        id: list-archs
+        run: |
+          DMOD_SRC_DIR=$(find build_discovery -path "*/_deps/dmod-src" -type d | head -1)
+
+          # create JSON array
+          ARCHS=$(find ${DMOD_SRC_DIR}/configs/arch -name "tools-cfg.cmake" | \
+            sed "s|${DMOD_SRC_DIR}/configs/arch/||g" | \
+            sed 's|/tools-cfg.cmake||g' | \
+            jq -R -s -c 'split("\n") | map(select(length > 0))')
+
+          echo "Found architectures: $ARCHS"
+          echo "architectures=$ARCHS" >> $GITHUB_OUTPUT
+
+  build-release:
+    name: Build Release for ${{ matrix.arch_name }}
+    needs: discover-architectures
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        arch_name: ${{ fromJson(needs.discover-architectures.outputs.architectures) }}
+
+    container:
+      image: chocotechnologies/dmod:1.0.4
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: get_version
+        run: |
+          # Extract version from tag (e.g., v1.2 -> 1.2)
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
+      - name: Build dmosi-proc for ${{ matrix.arch_name }}
+        run: |
+          set -e
+          ARCH_DIR_NAME=$(echo "${{ matrix.arch_name }}" | sed 's|/|-|g')
+          echo "ARCH_DIR_NAME=$ARCH_DIR_NAME" >> $GITHUB_ENV
+          echo "ARTIFACT_NAME=release-$ARCH_DIR_NAME" >> $GITHUB_ENV
+
+          cmake -B "build_$ARCH_DIR_NAME" -DDMOD_TOOLS_NAME=arch/${{ matrix.arch_name }}
+          # Build only the dmosi_proc target itself, not the default "all" target -
+          # the latter would also build dmod's own sibling dmod_system component
+          # (unconditionally added whenever DMOD_MODE=DMOD_SYSTEM), which
+          # dmosi-proc does not depend on and which does not compile on every
+          # dmod-supported toolchain (e.g. xtensa/esp32s3's newlib is missing
+          # <sys/termios.h>).
+          cmake --build "build_$ARCH_DIR_NAME" --target dmosi_proc -j"$(nproc)"
+
+          test -f "build_$ARCH_DIR_NAME/libdmosi_proc.a"
+          echo "✓ libdmosi_proc.a created successfully for ${{ matrix.arch_name }}"
+          ls -la "build_$ARCH_DIR_NAME/libdmosi_proc.a"
+
+      - name: Assemble release package with mkdmrpkg
+        run: |
+          set -e
+          PACKAGE_NAME="dmosi-proc-${{ github.event.release.tag_name }}-${ARCH_DIR_NAME}"
+          echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
+          echo "${{ github.event.release.body }}" > RELEASE_NOTES.txt
+
+          mkdmrpkg dmosi-proc.dmr \
+            -m dmosi-proc \
+            -r "$(pwd)" \
+            -b "$(pwd)/build_${ARCH_DIR_NAME}" \
+            --name "${PACKAGE_NAME}" \
+            --add-file RELEASE_NOTES.txt
+
+          echo "Package contents:"
+          find "${PACKAGE_NAME}" -type f
+
+      - name: Create release archive
+        run: |
+          set -e
+          # zip the package directory's *contents*, not the directory itself -
+          # dmf-get expects <module>.dmr directly at the zip root (see dmini's
+          # release for the working layout), so wrapping everything under a
+          # "${PACKAGE_NAME}/" prefix breaks dmf-get's headers/lib extraction.
+          (cd "${PACKAGE_NAME}" && zip -r "../${PACKAGE_NAME}.zip" .)
+          echo "Created archive:"
+          ls -lh dmosi-proc-*.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.PACKAGE_NAME }}.zip
+          retention-days: 1
+
+  generate-versions-manifest:
+    name: Generate versions.dmm
+    needs: discover-architectures
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history to get all tags
+
+      - name: Generate versions.dmm
+        run: |
+          set -e
+          echo "# List of available versions for dmosi-proc module" > versions.dmm
+          echo "# Generated automatically by CI" >> versions.dmm
+          echo "" >> versions.dmm
+
+          # Get all version tags (starting with 'v') and extract version numbers
+          # Exclude vlatest tag from the list
+          VERSIONS=$(git tag -l 'v*' | grep -v '^vlatest$' | sed 's/^v//' | sort -V | tr '\n' ' ' | sed 's/ $//' | xargs)
+
+          if [ -z "$VERSIONS" ]; then
+            echo "Warning: No version tags found"
+            VERSIONS="${{ github.event.release.tag_name }}"
+            VERSIONS="${VERSIONS#v}"
+          fi
+
+          echo "Found versions: $VERSIONS"
+
+          # Add $version-available directive for dmosi-proc module
+          echo "\$version-available dmosi-proc $VERSIONS" >> versions.dmm
+
+          echo "Generated versions.dmm:"
+          cat versions.dmm
+
+      - name: Upload versions.dmm as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: versions-manifest
+          path: |
+            versions.dmm
+            manifest.dmm
+          retention-days: 1
+
+  upload-release-assets:
+    name: Upload Release Assets
+    needs: [build-release, generate-versions-manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display artifact structure
+        run: |
+          echo "Downloaded artifacts:"
+          ls -lR artifacts/
+
+      - name: Upload release assets to versioned tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          shopt -s nullglob
+          zip_files=(artifacts/release-*/*.zip)
+
+          if [ ${#zip_files[@]} -eq 0 ]; then
+            echo "Error: No artifacts found to upload"
+            exit 1
+          fi
+
+          for zip_file in "${zip_files[@]}"; do
+            echo "Uploading $zip_file to ${{ github.event.release.tag_name }}..."
+            gh release upload ${{ github.event.release.tag_name }} \
+              "$zip_file" \
+              --repo ${{ github.repository }} \
+              --clobber
+          done
+
+          # Upload versions.dmm to the versioned release
+          if [ -f artifacts/versions-manifest/versions.dmm ]; then
+            echo "Uploading versions.dmm to ${{ github.event.release.tag_name }}..."
+            gh release upload ${{ github.event.release.tag_name }} \
+              artifacts/versions-manifest/versions.dmm \
+              --repo ${{ github.repository }} \
+              --clobber
+          fi
+
+          # Upload manifest.dmm to the versioned release
+          if [ -f artifacts/versions-manifest/manifest.dmm ]; then
+            echo "Uploading manifest.dmm to ${{ github.event.release.tag_name }}..."
+            gh release upload ${{ github.event.release.tag_name }} \
+              artifacts/versions-manifest/manifest.dmm \
+              --repo ${{ github.repository }} \
+              --clobber
+          fi
+
+          echo "Successfully uploaded ${#zip_files[@]} artifact(s) to ${{ github.event.release.tag_name }}"
+
+      - name: Create or update latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          # Check if vlatest release exists
+          if gh release view vlatest --repo ${{ github.repository }} >/dev/null 2>&1; then
+            echo "Release vlatest exists, deleting it..."
+            gh release delete vlatest --repo ${{ github.repository }} --yes
+          fi
+
+          # Create new vlatest release
+          echo "Creating vlatest release..."
+          gh release create vlatest \
+            --repo ${{ github.repository }} \
+            --title "Latest Release (based on ${{ github.event.release.tag_name }})" \
+            --notes "This release always points to the latest stable version. Currently based on ${{ github.event.release.tag_name }}."
+
+      - name: Upload release assets to latest tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          shopt -s nullglob
+          zip_files=(artifacts/release-*/*.zip)
+
+          for zip_file in "${zip_files[@]}"; do
+            echo "Uploading $zip_file to vlatest..."
+            gh release upload vlatest \
+              "$zip_file" \
+              --repo ${{ github.repository }} \
+              --clobber
+          done
+
+          # Upload versions.dmm to the latest release
+          if [ -f artifacts/versions-manifest/versions.dmm ]; then
+            echo "Uploading versions.dmm to vlatest..."
+            gh release upload vlatest \
+              artifacts/versions-manifest/versions.dmm \
+              --repo ${{ github.repository }} \
+              --clobber
+          fi
+
+          # Upload manifest.dmm to the latest release
+          if [ -f artifacts/versions-manifest/manifest.dmm ]; then
+            echo "Uploading manifest.dmm to vlatest..."
+            gh release upload vlatest \
+              artifacts/versions-manifest/manifest.dmm \
+              --repo ${{ github.repository }} \
+              --clobber
+          fi
+
+          echo "Successfully uploaded ${#zip_files[@]} artifact(s) to vlatest"

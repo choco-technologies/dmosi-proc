@@ -1,0 +1,5 @@
+# Include dynamically generated versions list from latest release
+$include https://github.com/choco-technologies/dmosi-proc/releases/download/vlatest/versions.dmm
+
+# Module entries with version placeholder - will be expanded by $version-available
+dmosi-proc https://github.com/choco-technologies/dmosi-proc/releases/download/v<version>/dmosi-proc-v<version>-<arch_name>.zip
