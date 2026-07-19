@@ -1,3 +1,4 @@
+#include "dmod.h"
 #include "dmosi.h"
 #include <string.h>
 #include <errno.h>
