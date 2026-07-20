@@ -19,6 +19,19 @@ typedef struct
 } dmosi_process_stream_t;
 
 /**
+ * @brief Node for a single registered process exit callback
+ *
+ * Stored as a singly-linked list on struct dmosi_process. The node pointer
+ * itself is handed out as the opaque dmosi_process_exit_callback_handle_t.
+ */
+struct dmosi_process_exit_callback
+{
+    dmosi_process_exit_callback_t callback;    /**< Callback to invoke on process exit */
+    void* arg;                                 /**< User-provided argument for the callback */
+    struct dmosi_process_exit_callback* next;  /**< Next registration, or NULL */
+};
+
+/**
  * @brief Opaque type for process
  *
  * This type represents a process in the DMOD OSI system.
@@ -39,6 +52,7 @@ struct dmosi_process
     dmosi_user_id_t uid;                            /**< User ID associated with the process */
     char* pwd;                                      /**< Working directory path */
     dmosi_process_stream_t streams[DMOSI_STREAM_COUNT]; /**< Stream slots (stdin/stdout/stderr/stdlog) */
+    struct dmosi_process_exit_callback* exit_callbacks; /**< Registered exit callbacks (singly-linked) */
 };
 
 /**
@@ -66,17 +80,97 @@ static dmosi_process_id_t generate_process_id()
 }
 
 /**
+ * @brief Detach and invoke all exit callbacks registered on a process
+ *
+ * Atomically detaches the callback list from the process (so a concurrent
+ * dmosi_process_register_exit_callback()/dmosi_process_unregister_exit_callback()
+ * call no longer sees it), then invokes and frees each node outside the lock
+ * so user callback code never runs while holding it.
+ *
+ * @param process Process that has terminated
+ * @param exit_status Exit status to report to the callbacks
+ */
+static void invoke_exit_callbacks( dmosi_process_t process, int exit_status )
+{
+    Dmod_EnterCritical();
+    struct dmosi_process_exit_callback* node = process->exit_callbacks;
+    process->exit_callbacks = NULL;
+    Dmod_ExitCritical();
+
+    while(node)
+    {
+        struct dmosi_process_exit_callback* next = node->next;
+        node->callback(process, exit_status, node->arg);
+        Dmod_Free(node);
+        node = next;
+    }
+}
+
+/**
+ * @brief Shared state tracking how many of a process's threads are still alive
+ *
+ * One instance is allocated per dmosi_process_kill()/dmosi_process_destroy() call and
+ * shared (via dmosi_thread_register_exit_callback()'s arg) across every thread being
+ * killed, so the process's own exit callbacks fire exactly once - from inside the last
+ * thread's real termination path, never before.
+ */
+typedef struct
+{
+    dmosi_process_t process;
+    int exit_status;
+    size_t threads_remaining;  /**< Dmod_EnterCritical/ExitCritical-protected countdown */
+} process_kill_completion_t;
+
+/**
+ * @brief Thread exit callback used internally by kill_threads() to detect real thread death
+ *
+ * Registered on every thread of a process right before it is killed. Because
+ * dmosi_thread_kill() invokes a thread's registered exit callbacks itself - from within
+ * the kill call for other threads, or just before self-termination for the thread killing
+ * itself - this fires exactly when a thread has actually exited, never merely when it was
+ * asked to. Only once every thread has reported in does it invoke the process's own exit
+ * callbacks, so they can never observe (or race against) a thread that is still alive.
+ *
+ * @param thread Thread that just exited (unused - only the countdown matters here)
+ * @param arg Shared process_kill_completion_t for this kill/destroy call
+ */
+static void on_process_thread_exited( dmosi_thread_t thread, void* arg )
+{
+    (void)thread;
+    process_kill_completion_t* completion = (process_kill_completion_t*)arg;
+
+    Dmod_EnterCritical();
+    completion->threads_remaining--;
+    bool all_exited = (completion->threads_remaining == 0);
+    Dmod_ExitCritical();
+
+    if(all_exited)
+    {
+        invoke_exit_callbacks(completion->process, completion->exit_status);
+        Dmod_Free(completion);
+    }
+}
+
+/**
  * @brief Kill all threads associated with a process
  *
+ * Once every thread has genuinely exited (as reported by dmosi_thread_kill() through the
+ * internal exit-callback hook registered here, see on_process_thread_exited()), the
+ * process's own exit callbacks are invoked. If the process has no threads at all, there is
+ * nothing to wait for, so they are invoked immediately.
+ *
  * @param process Process handle whose threads to kill
- * @param status Exit status code to pass to threads
+ * @param status Exit status code to pass to threads and to the process's exit callbacks
  * @return bool true on success, false on failure
  */
 static bool kill_threads( dmosi_process_t process, int status )
 {
     size_t count = dmosi_thread_get_by_process(process, NULL, 0);
     if(count == 0)
+    {
+        invoke_exit_callbacks(process, status);
         return true; // No threads to kill
+    }
 
     dmosi_thread_t* threads = Dmod_MallocEx(sizeof(dmosi_thread_t) * count, process->module_name);
     if(!threads)
@@ -89,6 +183,38 @@ static bool kill_threads( dmosi_process_t process, int status )
     if(actual_count != count)
     {
         DMOD_LOG_WARN("Thread count mismatch while killing process %s of module %s: expected %zu, got %zu\n", process->name, process->module_name, count, actual_count);
+    }
+
+    if(actual_count == 0)
+    {
+        Dmod_Free(threads);
+        invoke_exit_callbacks(process, status);
+        return true;
+    }
+
+    process_kill_completion_t* completion = Dmod_MallocEx(sizeof(*completion), process->module_name);
+    if(!completion)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for exit-callback tracking while killing process %s of module %s\n", process->name, process->module_name);
+        Dmod_Free(threads);
+        return false;
+    }
+    completion->process = process;
+    completion->exit_status = status;
+    completion->threads_remaining = actual_count;
+
+    // Register on every thread *before* killing any of them: dmosi_thread_kill() on a
+    // thread killing itself never returns to this loop, so any registration still to be
+    // done after that point would simply never happen, and the countdown would stall
+    // forever with the process's exit callbacks never firing.
+    for(size_t i = 0; i < actual_count; i++)
+    {
+        if(!dmosi_thread_register_exit_callback(threads[i], on_process_thread_exited, completion))
+        {
+            // Thread had already exited by the time we tried to observe it - count it as
+            // done right away instead of waiting for a callback that will never fire.
+            on_process_thread_exited(threads[i], completion);
+        }
     }
 
     for(size_t i = 0; i < actual_count; i++)
@@ -215,6 +341,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
     process->pid = generate_process_id();
     process->uid = 0;
     process->pwd = NULL;
+    process->exit_callbacks = NULL;
     memset(process->streams, 0, sizeof(process->streams));
     if(!process->name)
     {
@@ -298,6 +425,10 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_kill, (dmosi_process_t pro
     process->exit_status = status;
     process->state = DMOSI_PROCESS_STATE_TERMINATED;
 
+    // The process's own exit callbacks are invoked by kill_threads(), once every thread
+    // has actually exited (see on_process_thread_exited()) - not here, since the threads
+    // are still very much alive at this point and a callback must never be able to
+    // observe (or race against, e.g. by restarting the process) one that is still running.
     if(!kill_threads(process, status))
     {
         DMOD_LOG_ERROR("Failed to kill threads while killing process %s of module %s\n", process->name, process->module_name);
@@ -706,4 +837,77 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_find_by_id, (d
     char pid_str[32];
     Dmod_SnPrintf(pid_str, sizeof(pid_str), "ID %u", pid);
     return find_process_with_predicate(process_id_predicate, &pid, pid_str);
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_exit_callback_handle_t, _process_register_exit_callback, (dmosi_process_t process, dmosi_process_exit_callback_t callback, void* arg) )
+{
+    if(!validate_process(process) || !callback)
+    {
+        DMOD_LOG_ERROR("Invalid process handle or callback provided to register exit callback\n");
+        return NULL;
+    }
+
+    struct dmosi_process_exit_callback* node = Dmod_MallocEx(sizeof(*node), process->module_name);
+    if(!node)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for exit callback registration on process %s\n", process->name);
+        return NULL;
+    }
+    node->callback = callback;
+    node->arg = arg;
+
+    Dmod_EnterCritical();
+    bool already_terminated = (process->state == DMOSI_PROCESS_STATE_TERMINATED);
+    if(!already_terminated)
+    {
+        node->next = process->exit_callbacks;
+        process->exit_callbacks = node;
+    }
+    Dmod_ExitCritical();
+
+    if(already_terminated)
+    {
+        // The process's exit callbacks have already run and been discarded, so there
+        // is nothing left to attach this registration to.
+        Dmod_Free(node);
+        DMOD_LOG_WARN("Cannot register exit callback on already terminated process %s\n", process->name);
+        return NULL;
+    }
+
+    DMOD_LOG_VERBOSE("Registered exit callback on process %s\n", process->name);
+    return (dmosi_process_exit_callback_handle_t)node;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_unregister_exit_callback, (dmosi_process_t process, dmosi_process_exit_callback_handle_t handle) )
+{
+    if(!validate_process(process) || !handle)
+    {
+        DMOD_LOG_ERROR("Invalid process handle or callback handle provided to unregister exit callback\n");
+        return -EINVAL;
+    }
+
+    struct dmosi_process_exit_callback* target = (struct dmosi_process_exit_callback*)handle;
+
+    Dmod_EnterCritical();
+    struct dmosi_process_exit_callback** link = &process->exit_callbacks;
+    while(*link != NULL && *link != target)
+    {
+        link = &(*link)->next;
+    }
+    bool found = (*link == target);
+    if(found)
+    {
+        *link = target->next;
+    }
+    Dmod_ExitCritical();
+
+    if(!found)
+    {
+        DMOD_LOG_WARN("Exit callback handle not found on process %s (already unregistered or already invoked)\n", process->name);
+        return -EINVAL;
+    }
+
+    Dmod_Free(target);
+    DMOD_LOG_VERBOSE("Unregistered exit callback on process %s\n", process->name);
+    return 0;
 }

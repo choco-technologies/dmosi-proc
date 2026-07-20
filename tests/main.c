@@ -467,6 +467,137 @@ void test_process_unique_ids(void)
 
 // -----------------------------------------
 //
+//      Test: Process exit callbacks
+//
+// -----------------------------------------
+
+static int g_callback_invocations = 0;
+static dmosi_process_t g_last_callback_process = NULL;
+static int g_last_callback_exit_status = 0;
+static void* g_last_callback_arg = NULL;
+
+static void test_exit_callback(dmosi_process_t process, int exit_status, void* arg)
+{
+    g_callback_invocations++;
+    g_last_callback_process = process;
+    g_last_callback_exit_status = exit_status;
+    g_last_callback_arg = arg;
+}
+
+static void test_exit_callback_second(dmosi_process_t process, int exit_status, void* arg)
+{
+    (void)process;
+    (void)exit_status;
+    g_callback_invocations++;
+    g_last_callback_arg = arg;
+}
+
+void test_process_exit_callback(void)
+{
+    printf("\n=== Testing process exit callbacks ===\n");
+
+    // A single callback is invoked exactly once, with the right process/status/arg, on kill
+    g_callback_invocations = 0;
+    g_last_callback_process = NULL;
+    g_last_callback_exit_status = 0;
+    g_last_callback_arg = NULL;
+
+    dmosi_process_t proc = dmosi_process_create("callback_proc", "test_module", NULL);
+    TEST_ASSERT(proc != NULL, "Create process for exit callback test");
+
+    int marker = 123;
+    dmosi_process_exit_callback_handle_t handle = dmosi_process_register_exit_callback(proc, test_exit_callback, &marker);
+    TEST_ASSERT(handle != NULL, "Register exit callback returns a handle");
+
+    TEST_ASSERT(dmosi_process_kill(proc, 7) == 0, "Kill process with registered callback");
+
+    TEST_ASSERT(g_callback_invocations == 1, "Exit callback invoked exactly once on kill");
+    TEST_ASSERT(g_last_callback_process == proc, "Exit callback receives the terminated process");
+    TEST_ASSERT(g_last_callback_exit_status == 7, "Exit callback receives the exit status");
+    TEST_ASSERT(g_last_callback_arg == &marker, "Exit callback receives the registered argument");
+
+    // Destroying an already-killed process must not re-invoke the callback
+    dmosi_process_destroy(proc);
+    TEST_ASSERT(g_callback_invocations == 1, "Destroying an already-killed process does not re-invoke callback");
+
+    // Multiple callbacks on the same process are all invoked
+    g_callback_invocations = 0;
+    dmosi_process_t proc2 = dmosi_process_create("multi_callback_proc", "test_module", NULL);
+    TEST_ASSERT(proc2 != NULL, "Create process for multiple exit callback test");
+
+    TEST_ASSERT(dmosi_process_register_exit_callback(proc2, test_exit_callback, NULL) != NULL,
+                "Register first callback on process");
+    TEST_ASSERT(dmosi_process_register_exit_callback(proc2, test_exit_callback_second, NULL) != NULL,
+                "Register second callback on process");
+
+    dmosi_process_kill(proc2, 0);
+    TEST_ASSERT(g_callback_invocations == 2, "Both registered callbacks are invoked on kill");
+
+    dmosi_process_destroy(proc2);
+
+    // A process destroyed without ever being killed still fires its exit callbacks
+    g_callback_invocations = 0;
+    dmosi_process_t proc3 = dmosi_process_create("destroy_only_proc", "test_module", NULL);
+    TEST_ASSERT(proc3 != NULL, "Create process for destroy-only exit callback test");
+    TEST_ASSERT(dmosi_process_register_exit_callback(proc3, test_exit_callback, NULL) != NULL,
+                "Register callback on process that will only be destroyed");
+    dmosi_process_destroy(proc3);
+    TEST_ASSERT(g_callback_invocations == 1, "Exit callback fires on destroy even without an explicit kill");
+
+    // Unregistering a callback prevents it from being invoked
+    g_callback_invocations = 0;
+    dmosi_process_t proc4 = dmosi_process_create("unregister_proc", "test_module", NULL);
+    TEST_ASSERT(proc4 != NULL, "Create process for unregister test");
+
+    dmosi_process_exit_callback_handle_t handle4 = dmosi_process_register_exit_callback(proc4, test_exit_callback, NULL);
+    TEST_ASSERT(handle4 != NULL, "Register callback for unregister test");
+    TEST_ASSERT(dmosi_process_unregister_exit_callback(proc4, handle4) == 0,
+                "Unregister previously registered callback succeeds");
+
+    dmosi_process_kill(proc4, 0);
+    TEST_ASSERT(g_callback_invocations == 0, "Unregistered callback is not invoked on kill");
+
+    dmosi_process_destroy(proc4);
+
+    // Unregistering the same handle twice fails the second time
+    g_callback_invocations = 0;
+    dmosi_process_t proc5 = dmosi_process_create("double_unregister_proc", "test_module", NULL);
+    TEST_ASSERT(proc5 != NULL, "Create process for double-unregister test");
+
+    dmosi_process_exit_callback_handle_t handle5 = dmosi_process_register_exit_callback(proc5, test_exit_callback, NULL);
+    TEST_ASSERT(handle5 != NULL, "Register callback for double-unregister test");
+    TEST_ASSERT(dmosi_process_unregister_exit_callback(proc5, handle5) == 0,
+                "First unregister of a handle succeeds");
+    TEST_ASSERT(dmosi_process_unregister_exit_callback(proc5, handle5) == -EINVAL,
+                "Second unregister of the same handle returns -EINVAL");
+
+    dmosi_process_destroy(proc5);
+
+    // Registering on an already-terminated process fails
+    dmosi_process_t proc6 = dmosi_process_create("terminated_register_proc", "test_module", NULL);
+    TEST_ASSERT(proc6 != NULL, "Create process for register-after-terminated test");
+    dmosi_process_kill(proc6, 0);
+    TEST_ASSERT(dmosi_process_register_exit_callback(proc6, test_exit_callback, NULL) == NULL,
+                "Registering on an already-terminated process returns NULL");
+    dmosi_process_destroy(proc6);
+
+    // NULL handling
+    TEST_ASSERT(dmosi_process_register_exit_callback(NULL, test_exit_callback, NULL) == NULL,
+                "Register callback on NULL process returns NULL");
+
+    dmosi_process_t proc7 = dmosi_process_create("null_callback_proc", "test_module", NULL);
+    TEST_ASSERT(proc7 != NULL, "Create process for NULL callback test");
+    TEST_ASSERT(dmosi_process_register_exit_callback(proc7, NULL, NULL) == NULL,
+                "Register NULL callback function returns NULL");
+    TEST_ASSERT(dmosi_process_unregister_exit_callback(proc7, NULL) == -EINVAL,
+                "Unregister NULL handle returns -EINVAL");
+    TEST_ASSERT(dmosi_process_unregister_exit_callback(NULL, (dmosi_process_exit_callback_handle_t)&marker) == -EINVAL,
+                "Unregister on NULL process returns -EINVAL");
+    dmosi_process_destroy(proc7);
+}
+
+// -----------------------------------------
+//
 //      Test: NULL input handling
 //
 // -----------------------------------------
@@ -621,6 +752,7 @@ int main(void)
     test_process_id();
     test_process_module_name();
     test_process_kill();
+    test_process_exit_callback();
     test_process_wait();
     test_process_unique_ids();
     test_null_inputs();
