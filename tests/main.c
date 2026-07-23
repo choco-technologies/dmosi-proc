@@ -399,6 +399,15 @@ void test_process_foreground_module(void)
     TEST_ASSERT(dmosi_process_get_foreground_module(proc) == NULL,
                 "Initial foreground module is NULL");
 
+    // With no foreground module explicitly set, the process's own module context
+    // (set via dmosi_process_set_context at spawn time) is the default foreground module
+    Dmod_Context_t own_context;
+    TEST_ASSERT(dmosi_process_set_context(proc, &own_context) == 0,
+                "Set process's own module context");
+
+    TEST_ASSERT(dmosi_process_get_foreground_module(proc) == &own_context,
+                "Get foreground module defaults to the process's own context");
+
     // Set foreground module context
     Dmod_Context_t context_a;
     TEST_ASSERT(dmosi_process_set_foreground_module(proc, &context_a) == 0,
@@ -422,12 +431,12 @@ void test_process_foreground_module(void)
     TEST_ASSERT(dmosi_process_get_foreground_module(proc) == &context_a,
                 "Get foreground module returns restored context");
 
-    // Clear foreground module
+    // Clear foreground module - falls back to the process's own context again
     TEST_ASSERT(dmosi_process_set_foreground_module(proc, NULL) == 0,
                 "Clear foreground module context");
 
-    TEST_ASSERT(dmosi_process_get_foreground_module(proc) == NULL,
-                "Get foreground module returns NULL after clearing");
+    TEST_ASSERT(dmosi_process_get_foreground_module(proc) == &own_context,
+                "Get foreground module falls back to own context after clearing");
 
     dmosi_process_destroy(proc);
 }

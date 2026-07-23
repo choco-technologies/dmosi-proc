@@ -635,7 +635,10 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, Dmod_Context_t*, _process_get_foreground
         DMOD_LOG_ERROR("Cannot get foreground module of NULL process\n");
         return NULL;
     }
-    return process->foreground_module;
+    // No foreground module has been explicitly pushed (no synchronous nested call is in
+    // progress): the process's own module - set via dmosi_process_set_context at spawn
+    // time - is by definition the one currently running, so it's the foreground module.
+    return process->foreground_module ? process->foreground_module : process->context;
 }
 
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int,            _process_set_uid,   (dmosi_process_t process, dmosi_user_id_t uid) )
