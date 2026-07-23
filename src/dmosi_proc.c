@@ -44,6 +44,7 @@ struct dmosi_process
     uint64_t magic;                                 /**< Magic number for validation */
     char* name;                                     /**< Name of the process */
     Dmod_Context_t* context;                        /**< Dmod_Context_t this process is running, set via dmosi_process_set_context */
+    Dmod_Context_t* foreground_module;              /**< Context whose Main is currently executing in this process, set via dmosi_process_set_foreground_module */
     dmosi_process_t parent;                         /**< Parent process (NULL for detached processes) */
     char module_name[DMOD_MAX_MODULE_NAME_LENGTH];  /**< Name of the associated module */
     int exit_status;                                /**< Exit status code (set when process is killed) */
@@ -319,6 +320,72 @@ static bool process_id_predicate(dmosi_process_t process, void* context)
     return process->pid == *pid;
 }
 
+/**
+ * @brief Predicate function for finding a live process whose parent is a given process
+ */
+static bool process_parent_predicate(dmosi_process_t process, void* context)
+{
+    dmosi_process_t parent = (dmosi_process_t)context;
+    return process->parent == parent;
+}
+
+/**
+ * @brief Kill a process and every process spawned from it, recursively
+ *
+ * A killed process's children do not die with it on their own - dmosi_process_create()
+ * only records the parent link, it never ties a child's lifetime to it. Left alone, a
+ * supervisor that only ever tracks one PID per unit (e.g. console launching a shell via
+ * Dmod_SpawnModule and then waiting on it - the shell is a separate process, merely
+ * parented to console's own) would find that killing the one PID it tracks leaves the
+ * real long-running work completely untouched. This walks the same parent link
+ * dmosi_process_get_parent() exposes, mirroring how a real OS tears down a whole
+ * process tree/cgroup instead of a single PID.
+ *
+ * @param process Process whose subtree to kill (already validated non-NULL by the caller)
+ * @param status Exit status code applied to every process in the subtree
+ * @return bool true if every thread in the subtree was killed successfully
+ */
+static bool kill_process_tree( dmosi_process_t process, int status )
+{
+    bool ok = true;
+
+    // Kill children before the process itself: find_process_with_predicate() only ever
+    // sees processes with at least one live thread, so once a child's own threads are
+    // gone it simply stops being found - this loop naturally terminates as the tree is
+    // consumed from the leaves up, and never revisits an already-killed child.
+    dmosi_process_t child = find_process_with_predicate(process_parent_predicate, process, "child process");
+    while(child != NULL)
+    {
+        if(!kill_process_tree(child, status))
+        {
+            ok = false;
+        }
+        child = find_process_with_predicate(process_parent_predicate, process, "child process");
+    }
+
+    // Set exit_status/state *before* kill_threads(), not after: when a process kills its
+    // own currently-running thread (the normal case - every spawned module calls this on
+    // itself via Dmod_Exit when it finishes), dmosi_thread_kill() ends in vTaskDelete(NULL),
+    // which never returns to its caller. Anything placed after kill_threads() here would
+    // simply never run for that case, leaving the process stuck at its prior state forever
+    // (observed as background jobs whose underlying task is long gone but that dmell's
+    // reaper never sees as DMOSI_PROCESS_STATE_TERMINATED, so it never frees them).
+    process->exit_status = status;
+    process->state = DMOSI_PROCESS_STATE_TERMINATED;
+
+    // The process's own exit callbacks are invoked by kill_threads(), once every thread
+    // has actually exited (see on_process_thread_exited()) - not here, since the threads
+    // are still very much alive at this point and a callback must never be able to
+    // observe (or race against, e.g. by restarting the process) one that is still running.
+    if(!kill_threads(process, status))
+    {
+        DMOD_LOG_ERROR("Failed to kill threads while killing process %s of module %s\n", process->name, process->module_name);
+        ok = false;
+    }
+
+    return ok;
+}
+
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const char* name, const char* module_name, dmosi_process_t parent) )
 {
     if(name == NULL)
@@ -351,6 +418,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
     }
 
     process->context = NULL; /* set via dmosi_process_set_context once the module to run is known */
+    process->foreground_module = NULL;
     process->parent = parent;
     strcpy(process->module_name, module_name);
 
@@ -413,25 +481,11 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_kill, (dmosi_process_t pro
         DMOD_LOG_ERROR("Cannot kill NULL process\n");
         return -EINVAL;
     }
-    DMOD_LOG_VERBOSE("Killing process %s of module %s with status %d\n", process->name, process->module_name, status);
+    DMOD_LOG_VERBOSE("Killing process %s of module %s (and its children) with status %d\n", process->name, process->module_name, status);
 
-    // Set exit_status/state *before* kill_threads(), not after: when a process kills its
-    // own currently-running thread (the normal case - every spawned module calls this on
-    // itself via Dmod_Exit when it finishes), dmosi_thread_kill() ends in vTaskDelete(NULL),
-    // which never returns to its caller. Anything placed after kill_threads() here would
-    // simply never run for that case, leaving the process stuck at its prior state forever
-    // (observed as background jobs whose underlying task is long gone but that dmell's
-    // reaper never sees as DMOSI_PROCESS_STATE_TERMINATED, so it never frees them).
-    process->exit_status = status;
-    process->state = DMOSI_PROCESS_STATE_TERMINATED;
-
-    // The process's own exit callbacks are invoked by kill_threads(), once every thread
-    // has actually exited (see on_process_thread_exited()) - not here, since the threads
-    // are still very much alive at this point and a callback must never be able to
-    // observe (or race against, e.g. by restarting the process) one that is still running.
-    if(!kill_threads(process, status))
+    if(!kill_process_tree(process, status))
     {
-        DMOD_LOG_ERROR("Failed to kill threads while killing process %s of module %s\n", process->name, process->module_name);
+        DMOD_LOG_ERROR("Failed to kill process tree rooted at process %s of module %s\n", process->name, process->module_name);
         return -EFAULT;
     }
 
@@ -561,6 +615,27 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, Dmod_Context_t*, _process_get_context, (
         return NULL;
     }
     return process->context;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_foreground_module, (dmosi_process_t process, Dmod_Context_t* context) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to set foreground module\n");
+        return -EINVAL;
+    }
+    process->foreground_module = context;
+    return 0;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, Dmod_Context_t*, _process_get_foreground_module, (dmosi_process_t process) )
+{
+    if(!process)
+    {
+        DMOD_LOG_ERROR("Cannot get foreground module of NULL process\n");
+        return NULL;
+    }
+    return process->foreground_module;
 }
 
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int,            _process_set_uid,   (dmosi_process_t process, dmosi_user_id_t uid) )

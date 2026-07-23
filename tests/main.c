@@ -385,6 +385,55 @@ void test_process_module_name(void)
 
 // -----------------------------------------
 //
+//      Test: Process foreground module management
+//
+// -----------------------------------------
+void test_process_foreground_module(void)
+{
+    printf("\n=== Testing process foreground module management ===\n");
+
+    dmosi_process_t proc = dmosi_process_create("foreground_proc", "test_module", NULL);
+    TEST_ASSERT(proc != NULL, "Create process for foreground module test");
+
+    // Verify initial foreground module is unset
+    TEST_ASSERT(dmosi_process_get_foreground_module(proc) == NULL,
+                "Initial foreground module is NULL");
+
+    // Set foreground module context
+    Dmod_Context_t context_a;
+    TEST_ASSERT(dmosi_process_set_foreground_module(proc, &context_a) == 0,
+                "Set foreground module context");
+
+    TEST_ASSERT(dmosi_process_get_foreground_module(proc) == &context_a,
+                "Get foreground module returns previously set context");
+
+    // Simulate a nested/synchronous call switching the foreground context
+    Dmod_Context_t context_b;
+    TEST_ASSERT(dmosi_process_set_foreground_module(proc, &context_b) == 0,
+                "Set foreground module to a nested context");
+
+    TEST_ASSERT(dmosi_process_get_foreground_module(proc) == &context_b,
+                "Get foreground module returns nested context");
+
+    // Restore the previous foreground context
+    TEST_ASSERT(dmosi_process_set_foreground_module(proc, &context_a) == 0,
+                "Restore previous foreground module context");
+
+    TEST_ASSERT(dmosi_process_get_foreground_module(proc) == &context_a,
+                "Get foreground module returns restored context");
+
+    // Clear foreground module
+    TEST_ASSERT(dmosi_process_set_foreground_module(proc, NULL) == 0,
+                "Clear foreground module context");
+
+    TEST_ASSERT(dmosi_process_get_foreground_module(proc) == NULL,
+                "Get foreground module returns NULL after clearing");
+
+    dmosi_process_destroy(proc);
+}
+
+// -----------------------------------------
+//
 //      Test: Process kill
 //
 // -----------------------------------------
@@ -636,6 +685,12 @@ void test_null_inputs(void)
     TEST_ASSERT(dmosi_process_get_pwd(NULL) == NULL,
                 "Get PWD of NULL process returns NULL");
 
+    TEST_ASSERT(dmosi_process_get_foreground_module(NULL) == NULL,
+                "Get foreground module of NULL process returns NULL");
+
+    TEST_ASSERT(dmosi_process_set_foreground_module(NULL, NULL) == -EINVAL,
+                "Set foreground module of NULL process returns -EINVAL");
+
     TEST_ASSERT(dmosi_process_get_stream(NULL, DMOSI_STREAM_STDIN) == NULL,
                 "Get stream of NULL process returns NULL");
 
@@ -751,6 +806,7 @@ int main(void)
     test_process_exit_status();
     test_process_id();
     test_process_module_name();
+    test_process_foreground_module();
     test_process_kill();
     test_process_exit_callback();
     test_process_wait();
