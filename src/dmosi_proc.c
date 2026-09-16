@@ -4,7 +4,15 @@
 #include <errno.h>
 
 // DMOSPROC in ASCII
-#define MAGIC_NUMBER    0x444D4F5350524F43ULL    
+#define MAGIC_NUMBER    0x444D4F5350524F43ULL
+
+/**
+ * @brief Max times kill_process_tree() retries the same child before giving up
+ *
+ * See the comment above its retry loop: bounds how long it waits for a
+ * just-deleted task to actually disappear from thread enumeration.
+ */
+#define DMOSI_PROC_KILL_MAX_RETRIES    20
 
 static dmosi_process_id_t next_process_id = 1;
 
@@ -220,7 +228,8 @@ static bool kill_threads( dmosi_process_t process, int status )
 
     for(size_t i = 0; i < actual_count; i++)
     {
-        if(!dmosi_thread_kill(threads[i], status))
+        // dmosi_thread_kill() returns 0 on success, negative on failure - not a bool.
+        if(dmosi_thread_kill(threads[i], status) != 0)
         {
             DMOD_LOG_ERROR("Failed to kill thread in process %s of module %s\n", process->name, process->module_name);
             Dmod_Free(threads);
@@ -353,12 +362,42 @@ static bool kill_process_tree( dmosi_process_t process, int status )
     // sees processes with at least one live thread, so once a child's own threads are
     // gone it simply stops being found - this loop naturally terminates as the tree is
     // consumed from the leaves up, and never revisits an already-killed child.
+    //
+    // A just-deleted task can still show up in the next enumeration for a few passes
+    // until the idle task actually reclaims it (vTaskDelete() on another task only
+    // queues it for cleanup, it does not remove it from uxTaskGetSystemState() right
+    // away) - find_process_with_predicate() would then find the very same "child" it
+    // just finished killing. dmosi_thread_sleep() gives the idle task a chance to run
+    // between retries, and DMOSI_PROC_KILL_MAX_RETRIES bounds the wait so a genuinely
+    // unkillable child (as opposed to one merely pending cleanup) cannot hang this
+    // loop forever.
     dmosi_process_t child = find_process_with_predicate(process_parent_predicate, process, "child process");
+    dmosi_process_t previous_failed_child = NULL;
+    unsigned retries_left = DMOSI_PROC_KILL_MAX_RETRIES;
     while(child != NULL)
     {
+        if(child == previous_failed_child)
+        {
+            if(retries_left == 0)
+            {
+                DMOD_LOG_ERROR("Giving up on unkillable child process %s of module %s while killing process %s of module %s\n",
+                    child->name, child->module_name, process->name, process->module_name);
+                ok = false;
+                break;
+            }
+            retries_left--;
+            dmosi_thread_sleep(1);
+        }
+
         if(!kill_process_tree(child, status))
         {
             ok = false;
+            previous_failed_child = child;
+        }
+        else
+        {
+            previous_failed_child = NULL;
+            retries_left = DMOSI_PROC_KILL_MAX_RETRIES;
         }
         child = find_process_with_predicate(process_parent_predicate, process, "child process");
     }
