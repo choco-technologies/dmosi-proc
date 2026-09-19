@@ -203,6 +203,19 @@ void test_process_command(void)
     TEST_ASSERT(strcmp(dmosi_process_get_command(proc), "test_module --other") == 0,
                 "Get process command returns 'test_module --other' after update");
 
+    // Commands have no fixed maximum length - a long command line must round-trip
+    // in full, not get truncated to some fixed buffer size
+    char long_command[2000];
+    memset(long_command, 'x', sizeof(long_command) - 1);
+    long_command[sizeof(long_command) - 1] = '\0';
+    TEST_ASSERT(dmosi_process_set_command(proc, long_command) == 0,
+                "Set a long (2000 char) process command");
+    const char* got_long_command = dmosi_process_get_command(proc);
+    TEST_ASSERT(got_long_command != NULL && strlen(got_long_command) == strlen(long_command),
+                "Long process command is not truncated");
+    TEST_ASSERT(got_long_command != NULL && strcmp(got_long_command, long_command) == 0,
+                "Long process command round-trips exactly");
+
     dmosi_process_destroy(proc);
 }
 

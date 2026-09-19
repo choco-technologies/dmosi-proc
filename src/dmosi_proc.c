@@ -819,6 +819,14 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command, (dmosi_proces
         return -ENOMEM;
     }
 
+    // Dmod_StrDup() tags the allocation under whatever allocator identity is ambient at
+    // the call site - typically the process's own module, but the *spawning* module while
+    // this is being called from the module-start API (see dmod_spawn_module_internal in
+    // dmosi), since the new process's own thread has not started running yet at that point.
+    // Move it into the process's own bucket instead of leaving it permanently mistagged to
+    // whoever happened to call this - a no-op if the backend can't retag.
+    Dmod_RetagEx(process->command, process->module_name);
+
     return 0;
 }
 
