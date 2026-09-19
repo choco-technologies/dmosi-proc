@@ -4,6 +4,7 @@ project(dmosi_proc_tests VERSION 1.0 DESCRIPTION "DMOSI Process implementation t
 
 # Add the test executable
 add_executable(${PROJECT_NAME} main.c)
+dmod_set_current_allocator(${PROJECT_NAME})
 
 # Link against dmod, dmosi and dmosi_proc
 # dmosi_proc must come before dmosi so that its strong implementations
