@@ -90,25 +90,6 @@ static dmosi_process_id_t generate_process_id()
 }
 
 /**
- * @brief Resolve the heap-allocation bucket that belongs to a process
- *
- * Prefers the process's own context's unique per-instance AllocatorName (see the
- * doc comment on Dmod_Context_t::AllocatorName) over the raw module name - this is
- * the same identity Dmod_GetCurrentAllocatorNameEx() would report for the process's
- * own code, and distinguishes concurrently-running instances of the same module,
- * which share a module name but must not share an allocation bucket. Falls back to
- * the module name when the process has no context linked (e.g. one created directly
- * via dmosi_process_create(), or one whose context has already been unloaded).
- *
- * @param process Process handle (already validated by the caller)
- * @return const char* Allocator/bucket name to tag heap allocations for this process with
- */
-static const char* process_allocator_name(dmosi_process_t process)
-{
-    return process->context != NULL ? process->context->AllocatorName : process->module_name;
-}
-
-/**
  * @brief Detach and invoke all exit callbacks registered on a process
  *
  * Atomically detaches the callback list from the process (so a concurrent
@@ -843,8 +824,10 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command, (dmosi_proces
     // this is being called from the module-start API (see dmod_spawn_module_internal in
     // dmosi), since the new process's own thread has not started running yet at that point.
     // Move it into the process's own bucket instead of leaving it permanently mistagged to
-    // whoever happened to call this - a no-op if the backend can't retag.
-    Dmod_RetagEx(process->command, process_allocator_name(process));
+    // whoever happened to call this - a no-op if the backend can't retag. Tags against
+    // process->module_name, same as every other allocation this file makes on a process's
+    // behalf (the process struct itself, its thread list, exit-callback nodes, ...).
+    Dmod_RetagEx(process->command, process->module_name);
 
     return 0;
 }
@@ -874,10 +857,10 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command_args, (dmosi_p
         total_length += strlen(argv[i]);
     }
 
-    // Allocated directly under the process's own allocator bucket, unlike Dmod_StrDup()
-    // in _process_set_command() - so unlike that path, there is nothing to retag
-    // afterwards, and no intermediate string for a caller to build and free first.
-    char* command = Dmod_MallocEx(total_length + 1, process_allocator_name(process));
+    // Allocated directly under the process's own module name, unlike Dmod_StrDup() in
+    // _process_set_command() - so unlike that path, there is nothing to retag afterwards,
+    // and no intermediate string for a caller to build and free first.
+    char* command = Dmod_MallocEx(total_length + 1, process->module_name);
     if(!command)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for command\n");
