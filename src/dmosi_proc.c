@@ -60,6 +60,7 @@ struct dmosi_process
     dmosi_process_id_t pid;                         /**< Unique process ID */
     dmosi_user_id_t uid;                            /**< User ID associated with the process */
     char* pwd;                                      /**< Working directory path */
+    char* command;                                  /**< Command line the process was started with */
     dmosi_process_stream_t streams[DMOSI_STREAM_COUNT]; /**< Stream slots (stdin/stdout/stderr/stdlog) */
     struct dmosi_process_exit_callback* exit_callbacks; /**< Registered exit callbacks (singly-linked) */
 };
@@ -86,6 +87,34 @@ static bool validate_process( dmosi_process_t process )
 static dmosi_process_id_t generate_process_id()
 {
     return next_process_id++;
+}
+
+/**
+ * @brief Resolve the heap-allocation bucket that belongs to a process
+ *
+ * process->module_name is *not* unique - every concurrently-running instance of the
+ * same module shares it (e.g. a shell spawning another instance of itself), so tagging
+ * a process's own allocations with it would pool them into one bucket shared with every
+ * other instance, attributing this process's memory to whichever instance the accounting
+ * happens to land on rather than to this one. The context's AllocatorName is the actual
+ * per-instance-unique identity ("<module name>#<counter>", see the doc comment on
+ * Dmod_Context_t::AllocatorName) - the same one Dmod_GetCurrentAllocatorNameEx() would
+ * report for this process's own code, were it the one currently executing.
+ *
+ * dmod has no public accessor that resolves an arbitrary (non-current) context's
+ * AllocatorName - only Dmod_GetCurrentAllocatorNameEx(), which resolves whichever
+ * context the *calling* thread is in, not @p process's - so this reads the field
+ * directly as a deliberate, narrow exception to going through dmod's API.
+ *
+ * @param process Process handle (already validated by the caller)
+ * @return const char* Allocator/bucket name to tag heap allocations for this process with,
+ *         falling back to module_name when the process has no context linked (e.g. one
+ *         created directly via dmosi_process_create(), or one whose context has already
+ *         been unloaded)
+ */
+static const char* process_allocator_name(dmosi_process_t process)
+{
+    return process->context != NULL ? process->context->AllocatorName : process->module_name;
 }
 
 /**
@@ -447,6 +476,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
     process->pid = generate_process_id();
     process->uid = 0;
     process->pwd = NULL;
+    process->command = NULL;
     process->exit_callbacks = NULL;
     memset(process->streams, 0, sizeof(process->streams));
     if(!process->name)
@@ -508,6 +538,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, void, _process_destroy, (dmosi_process_t
 
     Dmod_Free(process->name);
     Dmod_Free(process->pwd);
+    Dmod_Free(process->command);
     Dmod_Free(process);
 
     Dmod_ExitCritical();
@@ -783,9 +814,123 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_pwd, (dmosi_pr
         DMOD_LOG_ERROR("Invalid process handle provided to get working directory\n");
         return NULL;
     }
-    
+
     // Return stored pwd or default to root if not set
     return process->pwd ? process->pwd : "/";
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command, (dmosi_process_t process, const char* command) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to set command\n");
+        return -EINVAL;
+    }
+    if(!command)
+    {
+        DMOD_LOG_ERROR("Command cannot be NULL\n");
+        return -EINVAL;
+    }
+    DMOD_LOG_VERBOSE("Setting command of process %s to %s\n", process->name, command);
+
+    // Free existing command if any
+    if(process->command)
+    {
+        Dmod_Free(process->command);
+    }
+
+    // Allocate and copy new command
+    process->command = Dmod_StrDup(command);
+    if(!process->command)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for command\n");
+        return -ENOMEM;
+    }
+
+    // Dmod_StrDup() tags the allocation under whatever allocator identity is ambient at
+    // the call site - typically the process's own module, but the *spawning* module while
+    // this is being called from the module-start API (see dmod_spawn_module_internal in
+    // dmosi), since the new process's own thread has not started running yet at that point.
+    // Move it into the process's own bucket instead of leaving it permanently mistagged to
+    // whoever happened to call this - a no-op if the backend can't retag.
+    Dmod_RetagEx(process->command, process_allocator_name(process));
+
+    return 0;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command_args, (dmosi_process_t process, int argc, char* argv[]) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to set command\n");
+        return -EINVAL;
+    }
+    if(argc <= 0 || argv == NULL || argv[0] == NULL)
+    {
+        DMOD_LOG_ERROR("No arguments provided to build command from\n");
+        return -EINVAL;
+    }
+
+    // First pass: compute the exact length needed, so the single allocation below fits
+    // the whole command line however long it is - no fixed cap.
+    size_t total_length = 0;
+    for(int i = 0; i < argc && argv[i] != NULL; i++)
+    {
+        if(i > 0)
+        {
+            total_length += 1; // separating space
+        }
+        total_length += strlen(argv[i]);
+    }
+
+    // Allocated directly under the process's own allocator bucket, unlike Dmod_StrDup()
+    // in _process_set_command() - so unlike that path, there is nothing to retag
+    // afterwards, and no intermediate string for a caller to build and free first.
+    char* command = Dmod_MallocEx(total_length + 1, process_allocator_name(process));
+    if(!command)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for command\n");
+        return -ENOMEM;
+    }
+
+    // Second pass: copy each argument into place
+    size_t used = 0;
+    for(int i = 0; i < argc && argv[i] != NULL; i++)
+    {
+        if(i > 0)
+        {
+            command[used++] = ' ';
+        }
+        size_t len = strlen(argv[i]);
+        memcpy(command + used, argv[i], len);
+        used += len;
+    }
+    command[used] = '\0';
+
+    DMOD_LOG_VERBOSE("Setting command of process %s to %s\n", process->name, command);
+
+    // Free existing command if any
+    if(process->command)
+    {
+        Dmod_Free(process->command);
+    }
+    process->command = command;
+
+    return 0;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_command, (dmosi_process_t process) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to get command\n");
+        return NULL;
+    }
+
+    // NULL (unset) is a normal result here: not every process has a command recorded
+    // (e.g. one created directly via dmosi_process_create without going through the
+    // module-start API).
+    return process->command;
 }
 
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stream, (dmosi_process_t process, dmosi_stream_index_t index, const char* path) )
