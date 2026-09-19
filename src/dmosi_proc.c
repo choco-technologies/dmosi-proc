@@ -830,6 +830,67 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command, (dmosi_proces
     return 0;
 }
 
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command_args, (dmosi_process_t process, int argc, char* argv[]) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to set command\n");
+        return -EINVAL;
+    }
+    if(argc <= 0 || argv == NULL || argv[0] == NULL)
+    {
+        DMOD_LOG_ERROR("No arguments provided to build command from\n");
+        return -EINVAL;
+    }
+
+    // First pass: compute the exact length needed, so the single allocation below fits
+    // the whole command line however long it is - no fixed cap.
+    size_t total_length = 0;
+    for(int i = 0; i < argc && argv[i] != NULL; i++)
+    {
+        if(i > 0)
+        {
+            total_length += 1; // separating space
+        }
+        total_length += strlen(argv[i]);
+    }
+
+    // Allocated directly under the process's own module name, unlike Dmod_StrDup() in
+    // _process_set_command() - so unlike that path, there is nothing to retag afterwards,
+    // and no intermediate string for a caller to build and free first.
+    char* command = Dmod_MallocEx(total_length + 1, process->module_name);
+    if(!command)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for command\n");
+        return -ENOMEM;
+    }
+
+    // Second pass: copy each argument into place
+    size_t used = 0;
+    for(int i = 0; i < argc && argv[i] != NULL; i++)
+    {
+        if(i > 0)
+        {
+            command[used++] = ' ';
+        }
+        size_t len = strlen(argv[i]);
+        memcpy(command + used, argv[i], len);
+        used += len;
+    }
+    command[used] = '\0';
+
+    DMOD_LOG_VERBOSE("Setting command of process %s to %s\n", process->name, command);
+
+    // Free existing command if any
+    if(process->command)
+    {
+        Dmod_Free(process->command);
+    }
+    process->command = command;
+
+    return 0;
+}
+
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_command, (dmosi_process_t process) )
 {
     if(!validate_process(process))

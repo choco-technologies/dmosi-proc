@@ -221,6 +221,63 @@ void test_process_command(void)
 
 // -----------------------------------------
 //
+//      Test: Process command from argv
+//
+// -----------------------------------------
+void test_process_command_args(void)
+{
+    printf("\n=== Testing process command from argv ===\n");
+
+    dmosi_process_t proc = dmosi_process_create("command_args_proc", "test_module", NULL);
+    TEST_ASSERT(proc != NULL, "Create process for command-from-argv test");
+
+    // Single-argument command
+    char* argv1[] = { "test_module" };
+    TEST_ASSERT(dmosi_process_set_command_args(proc, 1, argv1) == 0,
+                "Set process command from a single-element argv");
+    TEST_ASSERT(strcmp(dmosi_process_get_command(proc), "test_module") == 0,
+                "Get process command returns 'test_module'");
+
+    // Multi-argument command joins with single spaces
+    char* argv2[] = { "test_module", "arg1", "arg2" };
+    TEST_ASSERT(dmosi_process_set_command_args(proc, 3, argv2) == 0,
+                "Set process command from a multi-element argv");
+    TEST_ASSERT(strcmp(dmosi_process_get_command(proc), "test_module arg1 arg2") == 0,
+                "Get process command returns 'test_module arg1 arg2'");
+
+    // A long argument round-trips without truncation, same as dmosi_process_set_command
+    char long_arg[2000];
+    memset(long_arg, 'y', sizeof(long_arg) - 1);
+    long_arg[sizeof(long_arg) - 1] = '\0';
+    char* argv3[] = { "test_module", long_arg };
+    TEST_ASSERT(dmosi_process_set_command_args(proc, 2, argv3) == 0,
+                "Set process command from argv containing a long (2000 char) argument");
+    const char* got = dmosi_process_get_command(proc);
+    TEST_ASSERT(got != NULL && strncmp(got, "test_module ", strlen("test_module ")) == 0
+                && strcmp(got + strlen("test_module "), long_arg) == 0,
+                "Long argument round-trips exactly via set_command_args");
+
+    dmosi_process_destroy(proc);
+
+    // Invalid argument handling
+    dmosi_process_t proc2 = dmosi_process_create("command_args_invalid_proc", "test_module", NULL);
+    TEST_ASSERT(proc2 != NULL, "Create process for command-from-argv invalid-input test");
+
+    TEST_ASSERT(dmosi_process_set_command_args(proc2, 0, argv1) == -EINVAL,
+                "Set command from argv with argc == 0 returns -EINVAL");
+    TEST_ASSERT(dmosi_process_set_command_args(proc2, 1, NULL) == -EINVAL,
+                "Set command from NULL argv returns -EINVAL");
+    char* argv_null_first[] = { NULL };
+    TEST_ASSERT(dmosi_process_set_command_args(proc2, 1, argv_null_first) == -EINVAL,
+                "Set command from argv whose first element is NULL returns -EINVAL");
+    TEST_ASSERT(dmosi_process_set_command_args(NULL, 1, argv1) == -EINVAL,
+                "Set command from argv on NULL process returns -EINVAL");
+
+    dmosi_process_destroy(proc2);
+}
+
+// -----------------------------------------
+//
 //      Test: Process standard streams (stdin/stdout/stderr/stdlog)
 //
 // -----------------------------------------
@@ -865,6 +922,7 @@ int main(void)
     test_process_uid();
     test_process_pwd();
     test_process_command();
+    test_process_command_args();
     test_process_stdio();
     test_process_stream_lock();
     test_process_stream_inheritance();
