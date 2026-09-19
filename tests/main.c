@@ -175,6 +175,39 @@ void test_process_pwd(void)
 
 // -----------------------------------------
 //
+//      Test: Process command
+//
+// -----------------------------------------
+void test_process_command(void)
+{
+    printf("\n=== Testing process command ===\n");
+
+    dmosi_process_t proc = dmosi_process_create("command_proc", "test_module", NULL);
+    TEST_ASSERT(proc != NULL, "Create process for command test");
+
+    // Default command is unset
+    TEST_ASSERT(dmosi_process_get_command(proc) == NULL,
+                "Default command is NULL");
+
+    // Set command
+    TEST_ASSERT(dmosi_process_set_command(proc, "test_module arg1 arg2") == 0,
+                "Set process command to 'test_module arg1 arg2'");
+
+    // Get command
+    TEST_ASSERT(strcmp(dmosi_process_get_command(proc), "test_module arg1 arg2") == 0,
+                "Get process command returns 'test_module arg1 arg2'");
+
+    // Update command
+    TEST_ASSERT(dmosi_process_set_command(proc, "test_module --other") == 0,
+                "Update process command to 'test_module --other'");
+    TEST_ASSERT(strcmp(dmosi_process_get_command(proc), "test_module --other") == 0,
+                "Get process command returns 'test_module --other' after update");
+
+    dmosi_process_destroy(proc);
+}
+
+// -----------------------------------------
+//
 //      Test: Process standard streams (stdin/stdout/stderr/stdlog)
 //
 // -----------------------------------------
@@ -694,6 +727,9 @@ void test_null_inputs(void)
     TEST_ASSERT(dmosi_process_get_pwd(NULL) == NULL,
                 "Get PWD of NULL process returns NULL");
 
+    TEST_ASSERT(dmosi_process_get_command(NULL) == NULL,
+                "Get command of NULL process returns NULL");
+
     TEST_ASSERT(dmosi_process_get_foreground_module(NULL) == NULL,
                 "Get foreground module of NULL process returns NULL");
 
@@ -730,6 +766,9 @@ void test_null_inputs(void)
     TEST_ASSERT(dmosi_process_set_pwd(NULL, "/") == -EINVAL,
                 "Set PWD on NULL process returns -EINVAL");
 
+    TEST_ASSERT(dmosi_process_set_command(NULL, "cmd") == -EINVAL,
+                "Set command on NULL process returns -EINVAL");
+
     TEST_ASSERT(dmosi_process_set_exit_status(NULL, 0) == -EINVAL,
                 "Set exit status on NULL process returns -EINVAL");
 
@@ -745,6 +784,9 @@ void test_null_inputs(void)
 
     TEST_ASSERT(dmosi_process_set_pwd(proc, NULL) == -EINVAL,
                 "Set NULL PWD returns -EINVAL");
+
+    TEST_ASSERT(dmosi_process_set_command(proc, NULL) == -EINVAL,
+                "Set NULL command returns -EINVAL");
 
     TEST_ASSERT(dmosi_process_set_stream(proc, DMOSI_STREAM_STDOUT, NULL) == 0,
                 "Set stream with NULL path clears the binding and returns 0");
@@ -809,6 +851,7 @@ int main(void)
     test_process_parent_child();
     test_process_uid();
     test_process_pwd();
+    test_process_command();
     test_process_stdio();
     test_process_stream_lock();
     test_process_stream_inheritance();

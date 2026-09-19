@@ -60,6 +60,7 @@ struct dmosi_process
     dmosi_process_id_t pid;                         /**< Unique process ID */
     dmosi_user_id_t uid;                            /**< User ID associated with the process */
     char* pwd;                                      /**< Working directory path */
+    char* command;                                  /**< Command line the process was started with */
     dmosi_process_stream_t streams[DMOSI_STREAM_COUNT]; /**< Stream slots (stdin/stdout/stderr/stdlog) */
     struct dmosi_process_exit_callback* exit_callbacks; /**< Registered exit callbacks (singly-linked) */
 };
@@ -447,6 +448,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
     process->pid = generate_process_id();
     process->uid = 0;
     process->pwd = NULL;
+    process->command = NULL;
     process->exit_callbacks = NULL;
     memset(process->streams, 0, sizeof(process->streams));
     if(!process->name)
@@ -508,6 +510,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, void, _process_destroy, (dmosi_process_t
 
     Dmod_Free(process->name);
     Dmod_Free(process->pwd);
+    Dmod_Free(process->command);
     Dmod_Free(process);
 
     Dmod_ExitCritical();
@@ -783,9 +786,54 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_pwd, (dmosi_pr
         DMOD_LOG_ERROR("Invalid process handle provided to get working directory\n");
         return NULL;
     }
-    
+
     // Return stored pwd or default to root if not set
     return process->pwd ? process->pwd : "/";
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command, (dmosi_process_t process, const char* command) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to set command\n");
+        return -EINVAL;
+    }
+    if(!command)
+    {
+        DMOD_LOG_ERROR("Command cannot be NULL\n");
+        return -EINVAL;
+    }
+    DMOD_LOG_VERBOSE("Setting command of process %s to %s\n", process->name, command);
+
+    // Free existing command if any
+    if(process->command)
+    {
+        Dmod_Free(process->command);
+    }
+
+    // Allocate and copy new command
+    process->command = Dmod_StrDup(command);
+    if(!process->command)
+    {
+        DMOD_LOG_ERROR("Failed to allocate memory for command\n");
+        return -ENOMEM;
+    }
+
+    return 0;
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, const char*, _process_get_command, (dmosi_process_t process) )
+{
+    if(!validate_process(process))
+    {
+        DMOD_LOG_ERROR("Invalid process handle provided to get command\n");
+        return NULL;
+    }
+
+    // NULL (unset) is a normal result here: not every process has a command recorded
+    // (e.g. one created directly via dmosi_process_create without going through the
+    // module-start API).
+    return process->command;
 }
 
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stream, (dmosi_process_t process, dmosi_stream_index_t index, const char* path) )
