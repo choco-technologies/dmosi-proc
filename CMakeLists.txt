@@ -82,6 +82,10 @@ target_link_libraries(dmosi_proc PUBLIC
     dmosi
 )
 
+# dmod_sal.h requires DMOD_CURRENT_ALLOCATOR to be defined on the system side -
+# see dmod's dmod_set_current_allocator() in scripts/CMakeLists.txt.
+dmod_set_current_allocator(dmosi_proc)
+
 # Define version string for the library
 target_compile_definitions(dmosi_proc PRIVATE
     DMOSI_PROC_VERSION="${PROJECT_VERSION}"
