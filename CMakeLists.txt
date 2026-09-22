@@ -4,14 +4,6 @@
 cmake_minimum_required(VERSION 3.10)
 
 # ======================================================================
-#               DMOD OS Interface - Process Implementation
-# ======================================================================
-project(dmosi_proc
-    VERSION 1.0
-    DESCRIPTION "DMOD OS Interface for Process Management"
-    LANGUAGES C CXX)
-
-# ======================================================================
 #               For VS Code
 # ======================================================================
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -49,6 +41,17 @@ if(NOT TARGET dmod_inc)
 else()
     message(STATUS "dmod target already exists, skipping FetchContent")
 endif()
+
+# ======================================================================
+#               DMOD OS Interface - Process Implementation
+# ======================================================================
+# DMOD must configure the architecture-specific compilers before this project
+# enables C/CXX. Otherwise CMake locks in the host compiler and release
+# artifacts are mislabeled when DMOD_TOOLS_NAME selects another architecture.
+project(dmosi_proc
+    VERSION 1.0
+    DESCRIPTION "DMOD OS Interface for Process Management"
+    LANGUAGES C CXX)
 
 # ======================================================================
 #               Fetch DMOD OS Interface

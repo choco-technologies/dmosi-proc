@@ -72,6 +72,19 @@ jobs:
           echo "ARTIFACT_NAME=release-$ARCH_DIR_NAME" >> $GITHUB_ENV
 
           cmake -B "build_$ARCH_DIR_NAME" -DDMOD_TOOLS_NAME=arch/${{ matrix.arch_name }}
+          case "${{ matrix.arch_name }}" in
+            x86_64) EXPECTED_COMPILER=gcc ;;
+            aarch64/*) EXPECTED_COMPILER=aarch64-linux-gnu-gcc ;;
+            armv7/cortex-a53) EXPECTED_COMPILER=arm-linux-gnueabihf-gcc ;;
+            armv7/*) EXPECTED_COMPILER=arm-none-eabi-gcc ;;
+            xtensa/*) EXPECTED_COMPILER=xtensa-esp-elf-gcc ;;
+            *) echo "Unsupported architecture: ${{ matrix.arch_name }}"; exit 1 ;;
+          esac
+          C_COMPILER=$(sed -n 's/^CMAKE_C_COMPILER:[^=]*=//p' "build_$ARCH_DIR_NAME/CMakeCache.txt")
+          test "$(basename "$C_COMPILER")" = "$EXPECTED_COMPILER" || {
+            echo "Wrong compiler for ${{ matrix.arch_name }}: $C_COMPILER (expected $EXPECTED_COMPILER)"
+            exit 1
+          }
           # Build only the dmosi_proc target itself, not the default "all" target -
           # the latter would also build dmod's own sibling dmod_system component
           # (unconditionally added whenever DMOD_MODE=DMOD_SYSTEM), which
