@@ -81,7 +81,7 @@ target_include_directories(dmosi_proc PUBLIC
 )
 
 target_link_libraries(dmosi_proc PUBLIC
-    dmod
+    dmod_inc
     dmosi
 )
 
