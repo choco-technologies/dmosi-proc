@@ -90,34 +90,6 @@ static dmosi_process_id_t generate_process_id()
 }
 
 /**
- * @brief Resolve the heap-allocation bucket that belongs to a process
- *
- * process->module_name is *not* unique - every concurrently-running instance of the
- * same module shares it (e.g. a shell spawning another instance of itself), so tagging
- * a process's own allocations with it would pool them into one bucket shared with every
- * other instance, attributing this process's memory to whichever instance the accounting
- * happens to land on rather than to this one. The context's AllocatorName is the actual
- * per-instance-unique identity ("<module name>#<counter>", see the doc comment on
- * Dmod_Context_t::AllocatorName) - the same one Dmod_GetCurrentAllocatorNameEx() would
- * report for this process's own code, were it the one currently executing.
- *
- * dmod has no public accessor that resolves an arbitrary (non-current) context's
- * AllocatorName - only Dmod_GetCurrentAllocatorNameEx(), which resolves whichever
- * context the *calling* thread is in, not @p process's - so this reads the field
- * directly as a deliberate, narrow exception to going through dmod's API.
- *
- * @param process Process handle (already validated by the caller)
- * @return const char* Allocator/bucket name to tag heap allocations for this process with,
- *         falling back to module_name when the process has no context linked (e.g. one
- *         created directly via dmosi_process_create(), or one whose context has already
- *         been unloaded)
- */
-static const char* process_allocator_name(dmosi_process_t process)
-{
-    return process->context != NULL ? process->context->AllocatorName : process->module_name;
-}
-
-/**
  * @brief Detach and invoke all exit callbacks registered on a process
  *
  * Atomically detaches the callback list from the process (so a concurrent
@@ -210,7 +182,7 @@ static bool kill_threads( dmosi_process_t process, int status )
         return true; // No threads to kill
     }
 
-    dmosi_thread_t* threads = Dmod_MallocEx(sizeof(dmosi_thread_t) * count, process->module_name);
+    dmosi_thread_t* threads = Dmod_MallocEx(sizeof(dmosi_thread_t) * count, DMOD_CURRENT_ALLOCATOR);
     if(!threads)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for thread handles while killing process %s of module %s\n", process->name, process->module_name);
@@ -230,7 +202,7 @@ static bool kill_threads( dmosi_process_t process, int status )
         return true;
     }
 
-    process_kill_completion_t* completion = Dmod_MallocEx(sizeof(*completion), process->module_name);
+    process_kill_completion_t* completion = Dmod_MallocEx(sizeof(*completion), DMOD_CURRENT_ALLOCATOR);
     if(!completion)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for exit-callback tracking while killing process %s of module %s\n", process->name, process->module_name);
@@ -462,7 +434,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
         return NULL;
     }
     module_name = module_name ? module_name : DMOSI_SYSTEM_MODULE_NAME;
-    dmosi_process_t process = Dmod_MallocEx(sizeof(struct dmosi_process), module_name );
+    dmosi_process_t process = Dmod_MallocEx(sizeof(struct dmosi_process), DMOD_CURRENT_ALLOCATOR );
     if(!process)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for process %s of module %s\n", name, module_name);
@@ -472,7 +444,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
     process->magic = MAGIC_NUMBER;
     process->exit_status = 0;
     process->state = DMOSI_PROCESS_STATE_RUNNING;
-    process->name = Dmod_StrDup(name);
+    process->name = Dmod_StrDupEx(name, DMOD_CURRENT_ALLOCATOR);
     process->pid = generate_process_id();
     process->uid = 0;
     process->pwd = NULL;
@@ -797,7 +769,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_pwd, (dmosi_process_t 
     }
     
     // Allocate and copy new pwd
-    process->pwd = Dmod_StrDup(pwd);
+    process->pwd = Dmod_StrDupEx(pwd, DMOD_CURRENT_ALLOCATOR);
     if(!process->pwd)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for working directory\n");
@@ -840,20 +812,16 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command, (dmosi_proces
     }
 
     // Allocate and copy new command
-    process->command = Dmod_StrDup(command);
+    process->command = Dmod_StrDupEx(command, DMOD_CURRENT_ALLOCATOR);
     if(!process->command)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for command\n");
         return -ENOMEM;
     }
 
-    // Dmod_StrDup() tags the allocation under whatever allocator identity is ambient at
-    // the call site - typically the process's own module, but the *spawning* module while
-    // this is being called from the module-start API (see dmod_spawn_module_internal in
-    // dmosi), since the new process's own thread has not started running yet at that point.
-    // Move it into the process's own bucket instead of leaving it permanently mistagged to
-    // whoever happened to call this - a no-op if the backend can't retag.
-    Dmod_RetagEx(process->command, process_allocator_name(process));
+    /* Process metadata outlives its module context: Dmod_Unload collects the
+     * context before a parent reaps this process. Keep the command under the
+     * process implementation's allocator, like name/pwd/stream paths. */
 
     return 0;
 }
@@ -883,10 +851,8 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command_args, (dmosi_p
         total_length += strlen(argv[i]);
     }
 
-    // Allocated directly under the process's own allocator bucket, unlike Dmod_StrDup()
-    // in _process_set_command() - so unlike that path, there is nothing to retag
-    // afterwards, and no intermediate string for a caller to build and free first.
-    char* command = Dmod_MallocEx(total_length + 1, process_allocator_name(process));
+    // Explicitly owned by the process until process_destroy(), not module GC.
+    char* command = Dmod_Malloc(total_length + 1);
     if(!command)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for command\n");
@@ -971,7 +937,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stream, (dmosi_process
         return -EIO;
     }
 
-    char* new_path = Dmod_StrDup(path);
+    char* new_path = Dmod_StrDupEx(path, DMOD_CURRENT_ALLOCATOR);
     if(!new_path)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for stream path\n");
@@ -1109,7 +1075,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_exit_callback_handle_t, _p
         return NULL;
     }
 
-    struct dmosi_process_exit_callback* node = Dmod_MallocEx(sizeof(*node), process->module_name);
+    struct dmosi_process_exit_callback* node = Dmod_MallocEx(sizeof(*node), DMOD_CURRENT_ALLOCATOR);
     if(!node)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for exit callback registration on process %s\n", process->name);
