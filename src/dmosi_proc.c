@@ -2,6 +2,7 @@
 #include "dmosi.h"
 #include <string.h>
 #include <errno.h>
+#include <stdarg.h>
 
 // DMOSPROC in ASCII
 #define MAGIC_NUMBER    0x444D4F5350524F43ULL
@@ -532,6 +533,101 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_kill, (dmosi_process_t pro
     }
 
     return 0;
+}
+
+/**
+ * @brief Human-readable name of a fault type, for the fault report
+ *
+ * @param type Fault type
+ * @return const char* Name of the fault, never NULL
+ */
+static const char* fault_type_name( dmosi_fault_type_t type )
+{
+    switch(type)
+    {
+        case DMOSI_FAULT_STACK_OVERFLOW:        return "stack overflow";
+        case DMOSI_FAULT_MEMORY_ACCESS:         return "invalid memory access";
+        case DMOSI_FAULT_ILLEGAL_INSTRUCTION:   return "illegal instruction";
+        case DMOSI_FAULT_ARITHMETIC:            return "arithmetic error";
+        default:                                return "fault";
+    }
+}
+
+/**
+ * @brief Write a formatted line to the standard output of a given process
+ *
+ * Dmod_Printf() always resolves the standard output of the *calling* process, which is
+ * not necessarily @p process: a stack overflow is reported by a thread of the thread
+ * backend, on behalf of the process that overflowed. Writing to the handle of the
+ * process's own stream slot reaches the right stream from either caller. A process
+ * whose standard output has no file bound prints to the kernel output, exactly as its
+ * own Dmod_Printf() calls would.
+ *
+ * @param process Process whose standard output to write to (already validated)
+ * @param format printf-style format string
+ */
+static void print_to_process_stdout( dmosi_process_t process, const char* format, ... )
+{
+    va_list args;
+    va_start(args, format);
+
+    void* handle = process->streams[DMOSI_STREAM_STDOUT].handle;
+    if(handle)
+    {
+        Dmod_VFPrintf(handle, format, args);
+    }
+    else
+    {
+        Dmod_VPrintf(format, args);
+    }
+
+    va_end(args);
+}
+
+/**
+ * @brief Report a fault on the standard output of the process it happened in
+ *
+ * @param process Process to report to (already validated)
+ * @param fault Description of the fault (already validated non-NULL)
+ */
+static void report_fault( dmosi_process_t process, const dmosi_fault_t* fault )
+{
+    const char* thread_name = fault->thread ? dmosi_thread_get_name(fault->thread) : NULL;
+
+    // The faulting thread never resumes the code it was executing, so if it was in the
+    // middle of printing it can no longer release the stream it had locked - and with
+    // the slot left locked the report below would be diverted to the kernel output.
+    dmosi_process_unlock_stream(process, DMOSI_STREAM_STDOUT);
+
+    print_to_process_stdout(process, "\n*** %s: %s in thread '%s' (pid %u)\n",
+        process->name, fault_type_name(fault->type), thread_name ? thread_name : "?", (unsigned)process->pid);
+    // Where it happened is not always known: a stack overflow found by the kernel's
+    // stack check is noticed after the fact, not at the instruction that caused it
+    if(fault->pc != 0 || fault->sp != 0)
+    {
+        print_to_process_stdout(process, "    pc=0x%08lX sp=0x%08lX\n", (unsigned long)fault->pc, (unsigned long)fault->sp);
+    }
+    if(fault->has_address)
+    {
+        print_to_process_stdout(process, "    address=0x%08lX\n", (unsigned long)fault->address);
+    }
+    print_to_process_stdout(process, "    Process terminated.\n");
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_fault, (dmosi_process_t process, const dmosi_fault_t* fault) )
+{
+    if(!validate_process(process) || !fault)
+    {
+        DMOD_LOG_ERROR("Cannot handle a fault: invalid process or fault description\n");
+        return -EINVAL;
+    }
+
+    report_fault(process, fault);
+    DMOD_LOG_ERROR("Process %s (pid %u) of module %s terminated: %s\n",
+        process->name, (unsigned)process->pid, process->module_name, fault_type_name(fault->type));
+
+    // Does not return when called by a thread of the process itself (the faulting thread)
+    return dmosi_process_kill(process, DMOSI_FAULT_EXIT_STATUS);
 }
 
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_wait, (dmosi_process_t process, int32_t timeout_ms) )
@@ -1075,6 +1171,9 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_exit_callback_handle_t, _p
         return NULL;
     }
 
+    // Owned by the process layer, not by the module the process runs: a callback is allowed to unload
+    // that module (the end of a process does, see Dmod_Spawn in dmosi), which frees everything tagged
+    // with its name - this node included, while invoke_exit_callbacks() still has it in hand.
     struct dmosi_process_exit_callback* node = Dmod_MallocEx(sizeof(*node), DMOD_CURRENT_ALLOCATOR);
     if(!node)
     {
