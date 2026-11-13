@@ -13,6 +13,7 @@ Implementation of the Process interface from [DMOSI](https://github.com/choco-te
 - **Process properties** – get and set process name, ID, UID, module name, working directory, state, and exit status
 - **Process lookup** – find a running process by name or by process ID
 - **Thread integration** – automatically manages threads associated with a process during kill and destroy operations
+- **Fault handling** – `dmosi_process_fault()` reports a fault on the standard output of the process (the stream it was working on, wherever it is bound) and kills it with `DMOSI_FAULT_EXIT_STATUS`
 
 ## Building
 

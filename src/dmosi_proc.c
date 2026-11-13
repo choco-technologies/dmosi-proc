@@ -2,6 +2,7 @@
 #include "dmosi.h"
 #include <string.h>
 #include <errno.h>
+#include <stdarg.h>
 
 // DMOSPROC in ASCII
 #define MAGIC_NUMBER    0x444D4F5350524F43ULL
@@ -87,34 +88,6 @@ static bool validate_process( dmosi_process_t process )
 static dmosi_process_id_t generate_process_id()
 {
     return next_process_id++;
-}
-
-/**
- * @brief Resolve the heap-allocation bucket that belongs to a process
- *
- * process->module_name is *not* unique - every concurrently-running instance of the
- * same module shares it (e.g. a shell spawning another instance of itself), so tagging
- * a process's own allocations with it would pool them into one bucket shared with every
- * other instance, attributing this process's memory to whichever instance the accounting
- * happens to land on rather than to this one. The context's AllocatorName is the actual
- * per-instance-unique identity ("<module name>#<counter>", see the doc comment on
- * Dmod_Context_t::AllocatorName) - the same one Dmod_GetCurrentAllocatorNameEx() would
- * report for this process's own code, were it the one currently executing.
- *
- * dmod has no public accessor that resolves an arbitrary (non-current) context's
- * AllocatorName - only Dmod_GetCurrentAllocatorNameEx(), which resolves whichever
- * context the *calling* thread is in, not @p process's - so this reads the field
- * directly as a deliberate, narrow exception to going through dmod's API.
- *
- * @param process Process handle (already validated by the caller)
- * @return const char* Allocator/bucket name to tag heap allocations for this process with,
- *         falling back to module_name when the process has no context linked (e.g. one
- *         created directly via dmosi_process_create(), or one whose context has already
- *         been unloaded)
- */
-static const char* process_allocator_name(dmosi_process_t process)
-{
-    return process->context != NULL ? process->context->AllocatorName : process->module_name;
 }
 
 /**
@@ -210,7 +183,7 @@ static bool kill_threads( dmosi_process_t process, int status )
         return true; // No threads to kill
     }
 
-    dmosi_thread_t* threads = Dmod_MallocEx(sizeof(dmosi_thread_t) * count, process->module_name);
+    dmosi_thread_t* threads = Dmod_MallocEx(sizeof(dmosi_thread_t) * count, DMOD_CURRENT_ALLOCATOR);
     if(!threads)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for thread handles while killing process %s of module %s\n", process->name, process->module_name);
@@ -230,7 +203,7 @@ static bool kill_threads( dmosi_process_t process, int status )
         return true;
     }
 
-    process_kill_completion_t* completion = Dmod_MallocEx(sizeof(*completion), process->module_name);
+    process_kill_completion_t* completion = Dmod_MallocEx(sizeof(*completion), DMOD_CURRENT_ALLOCATOR);
     if(!completion)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for exit-callback tracking while killing process %s of module %s\n", process->name, process->module_name);
@@ -462,7 +435,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
         return NULL;
     }
     module_name = module_name ? module_name : DMOSI_SYSTEM_MODULE_NAME;
-    dmosi_process_t process = Dmod_MallocEx(sizeof(struct dmosi_process), module_name );
+    dmosi_process_t process = Dmod_MallocEx(sizeof(struct dmosi_process), DMOD_CURRENT_ALLOCATOR );
     if(!process)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for process %s of module %s\n", name, module_name);
@@ -472,7 +445,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_t, _process_create,(const 
     process->magic = MAGIC_NUMBER;
     process->exit_status = 0;
     process->state = DMOSI_PROCESS_STATE_RUNNING;
-    process->name = Dmod_StrDup(name);
+    process->name = Dmod_StrDupEx(name, DMOD_CURRENT_ALLOCATOR);
     process->pid = generate_process_id();
     process->uid = 0;
     process->pwd = NULL;
@@ -560,6 +533,101 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_kill, (dmosi_process_t pro
     }
 
     return 0;
+}
+
+/**
+ * @brief Human-readable name of a fault type, for the fault report
+ *
+ * @param type Fault type
+ * @return const char* Name of the fault, never NULL
+ */
+static const char* fault_type_name( dmosi_fault_type_t type )
+{
+    switch(type)
+    {
+        case DMOSI_FAULT_STACK_OVERFLOW:        return "stack overflow";
+        case DMOSI_FAULT_MEMORY_ACCESS:         return "invalid memory access";
+        case DMOSI_FAULT_ILLEGAL_INSTRUCTION:   return "illegal instruction";
+        case DMOSI_FAULT_ARITHMETIC:            return "arithmetic error";
+        default:                                return "fault";
+    }
+}
+
+/**
+ * @brief Write a formatted line to the standard output of a given process
+ *
+ * Dmod_Printf() always resolves the standard output of the *calling* process, which is
+ * not necessarily @p process: a stack overflow is reported by a thread of the thread
+ * backend, on behalf of the process that overflowed. Writing to the handle of the
+ * process's own stream slot reaches the right stream from either caller. A process
+ * whose standard output has no file bound prints to the kernel output, exactly as its
+ * own Dmod_Printf() calls would.
+ *
+ * @param process Process whose standard output to write to (already validated)
+ * @param format printf-style format string
+ */
+static void print_to_process_stdout( dmosi_process_t process, const char* format, ... )
+{
+    va_list args;
+    va_start(args, format);
+
+    void* handle = process->streams[DMOSI_STREAM_STDOUT].handle;
+    if(handle)
+    {
+        Dmod_VFPrintf(handle, format, args);
+    }
+    else
+    {
+        Dmod_VPrintf(format, args);
+    }
+
+    va_end(args);
+}
+
+/**
+ * @brief Report a fault on the standard output of the process it happened in
+ *
+ * @param process Process to report to (already validated)
+ * @param fault Description of the fault (already validated non-NULL)
+ */
+static void report_fault( dmosi_process_t process, const dmosi_fault_t* fault )
+{
+    const char* thread_name = fault->thread ? dmosi_thread_get_name(fault->thread) : NULL;
+
+    // The faulting thread never resumes the code it was executing, so if it was in the
+    // middle of printing it can no longer release the stream it had locked - and with
+    // the slot left locked the report below would be diverted to the kernel output.
+    dmosi_process_unlock_stream(process, DMOSI_STREAM_STDOUT);
+
+    print_to_process_stdout(process, "\n*** %s: %s in thread '%s' (pid %u)\n",
+        process->name, fault_type_name(fault->type), thread_name ? thread_name : "?", (unsigned)process->pid);
+    // Where it happened is not always known: a stack overflow found by the kernel's
+    // stack check is noticed after the fact, not at the instruction that caused it
+    if(fault->pc != 0 || fault->sp != 0)
+    {
+        print_to_process_stdout(process, "    pc=0x%08lX sp=0x%08lX\n", (unsigned long)fault->pc, (unsigned long)fault->sp);
+    }
+    if(fault->has_address)
+    {
+        print_to_process_stdout(process, "    address=0x%08lX\n", (unsigned long)fault->address);
+    }
+    print_to_process_stdout(process, "    Process terminated.\n");
+}
+
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_fault, (dmosi_process_t process, const dmosi_fault_t* fault) )
+{
+    if(!validate_process(process) || !fault)
+    {
+        DMOD_LOG_ERROR("Cannot handle a fault: invalid process or fault description\n");
+        return -EINVAL;
+    }
+
+    report_fault(process, fault);
+    DMOD_LOG_ERROR("Process %s (pid %u) of module %s terminated: %s\n",
+        process->name, (unsigned)process->pid, process->module_name, fault_type_name(fault->type));
+
+    // Does not return when called by a thread of the process itself (the faulting thread)
+    return dmosi_process_kill(process, DMOSI_FAULT_EXIT_STATUS);
 }
 
 DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_wait, (dmosi_process_t process, int32_t timeout_ms) )
@@ -797,7 +865,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_pwd, (dmosi_process_t 
     }
     
     // Allocate and copy new pwd
-    process->pwd = Dmod_StrDup(pwd);
+    process->pwd = Dmod_StrDupEx(pwd, DMOD_CURRENT_ALLOCATOR);
     if(!process->pwd)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for working directory\n");
@@ -840,20 +908,16 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command, (dmosi_proces
     }
 
     // Allocate and copy new command
-    process->command = Dmod_StrDup(command);
+    process->command = Dmod_StrDupEx(command, DMOD_CURRENT_ALLOCATOR);
     if(!process->command)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for command\n");
         return -ENOMEM;
     }
 
-    // Dmod_StrDup() tags the allocation under whatever allocator identity is ambient at
-    // the call site - typically the process's own module, but the *spawning* module while
-    // this is being called from the module-start API (see dmod_spawn_module_internal in
-    // dmosi), since the new process's own thread has not started running yet at that point.
-    // Move it into the process's own bucket instead of leaving it permanently mistagged to
-    // whoever happened to call this - a no-op if the backend can't retag.
-    Dmod_RetagEx(process->command, process_allocator_name(process));
+    /* Process metadata outlives its module context: Dmod_Unload collects the
+     * context before a parent reaps this process. Keep the command under the
+     * process implementation's allocator, like name/pwd/stream paths. */
 
     return 0;
 }
@@ -883,10 +947,8 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_command_args, (dmosi_p
         total_length += strlen(argv[i]);
     }
 
-    // Allocated directly under the process's own allocator bucket, unlike Dmod_StrDup()
-    // in _process_set_command() - so unlike that path, there is nothing to retag
-    // afterwards, and no intermediate string for a caller to build and free first.
-    char* command = Dmod_MallocEx(total_length + 1, process_allocator_name(process));
+    // Explicitly owned by the process until process_destroy(), not module GC.
+    char* command = Dmod_Malloc(total_length + 1);
     if(!command)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for command\n");
@@ -971,7 +1033,7 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _process_set_stream, (dmosi_process
         return -EIO;
     }
 
-    char* new_path = Dmod_StrDup(path);
+    char* new_path = Dmod_StrDupEx(path, DMOD_CURRENT_ALLOCATOR);
     if(!new_path)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for stream path\n");
@@ -1109,7 +1171,10 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_process_exit_callback_handle_t, _p
         return NULL;
     }
 
-    struct dmosi_process_exit_callback* node = Dmod_MallocEx(sizeof(*node), process->module_name);
+    // Owned by the process layer, not by the module the process runs: a callback is allowed to unload
+    // that module (the end of a process does, see Dmod_Spawn in dmosi), which frees everything tagged
+    // with its name - this node included, while invoke_exit_callbacks() still has it in hand.
+    struct dmosi_process_exit_callback* node = Dmod_MallocEx(sizeof(*node), DMOD_CURRENT_ALLOCATOR);
     if(!node)
     {
         DMOD_LOG_ERROR("Failed to allocate memory for exit callback registration on process %s\n", process->name);

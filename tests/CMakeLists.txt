@@ -18,3 +18,13 @@ target_link_options(${PROJECT_NAME} PRIVATE -T ${CMAKE_CURRENT_SOURCE_DIR}/main.
 
 # Register test with CTest
 add_test(NAME dmosi_proc_tests COMMAND ${PROJECT_NAME})
+
+add_executable(command_lifetime command_lifetime.c)
+dmod_set_current_allocator(command_lifetime)
+target_link_libraries(command_lifetime dmod dmosi_proc dmosi)
+target_link_options(command_lifetime PRIVATE -L ${DMOD_DIR}/scripts
+    -T ${CMAKE_CURRENT_SOURCE_DIR}/main.ld
+    -Wl,--wrap=Dmod_MallocEx,--wrap=Dmod_FreeEx,--wrap=Dmod_FreeModule,--wrap=Dmod_RetagEx)
+add_test(NAME command_lifetime COMMAND command_lifetime)
+
+target_compile_options(command_lifetime PRIVATE -UNDEBUG)

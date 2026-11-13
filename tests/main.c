@@ -577,6 +577,70 @@ void test_process_kill(void)
 
 // -----------------------------------------
 //
+//      Test: Process fault
+//
+// -----------------------------------------
+static bool file_contains(const char* path, const char* text)
+{
+    char content[512] = {0};
+    FILE* file = fopen(path, "r");
+    if (file == NULL) {
+        return false;
+    }
+    size_t length = fread(content, 1, sizeof(content) - 1, file);
+    content[length] = '\0';
+    fclose(file);
+    return strstr(content, text) != NULL;
+}
+
+void test_process_fault(void)
+{
+    printf("\n=== Testing process fault ===\n");
+
+    const char* stdout_path = "/tmp/dmosi_test_fault_stdout.log";
+    remove(stdout_path);
+
+    dmosi_process_t proc = dmosi_process_create("fault_proc", "test_module", NULL);
+    TEST_ASSERT(proc != NULL, "Create process for fault test");
+    TEST_ASSERT(dmosi_process_set_stream(proc, DMOSI_STREAM_STDOUT, stdout_path) == 0,
+                "Bind stdout of the process to a file");
+
+    dmosi_fault_t fault = {
+        .type = DMOSI_FAULT_STACK_OVERFLOW,
+        .thread = NULL,
+        .pc = 0x1234,
+        .sp = 0x5678,
+        .address = 0,
+        .has_address = false,
+    };
+
+    // The faulting thread may have died holding the stream: the report must still land there
+    TEST_ASSERT(dmosi_process_lock_stream(proc, DMOSI_STREAM_STDOUT) == 0, "Leave stdout locked, as a faulting thread would");
+
+    TEST_ASSERT(dmosi_process_fault(proc, &fault) == 0, "Fault terminates the process");
+    TEST_ASSERT(dmosi_process_get_state(proc) == DMOSI_PROCESS_STATE_TERMINATED,
+                "Process state is TERMINATED after a fault");
+    TEST_ASSERT(dmosi_process_get_exit_status(proc) == DMOSI_FAULT_EXIT_STATUS,
+                "Exit status is DMOSI_FAULT_EXIT_STATUS after a fault");
+
+    dmosi_process_destroy(proc);
+
+    TEST_ASSERT(file_contains(stdout_path, "fault_proc: stack overflow"),
+                "Fault is reported on the stdout of the process");
+    TEST_ASSERT(file_contains(stdout_path, "Process terminated"),
+                "Report says the process was terminated");
+
+    TEST_ASSERT(dmosi_process_fault(NULL, &fault) == -EINVAL, "Fault of a NULL process returns -EINVAL");
+
+    dmosi_process_t proc2 = dmosi_process_create("fault_proc2", "test_module", NULL);
+    TEST_ASSERT(dmosi_process_fault(proc2, NULL) == -EINVAL, "Fault without a description returns -EINVAL");
+    TEST_ASSERT(dmosi_process_get_state(proc2) == DMOSI_PROCESS_STATE_RUNNING,
+                "Process keeps running after a rejected fault");
+    dmosi_process_destroy(proc2);
+}
+
+// -----------------------------------------
+//
 //      Test: Process wait
 //
 // -----------------------------------------
@@ -931,6 +995,7 @@ int main(void)
     test_process_module_name();
     test_process_foreground_module();
     test_process_kill();
+    test_process_fault();
     test_process_exit_callback();
     test_process_wait();
     test_process_unique_ids();
